@@ -1,18 +1,21 @@
 "use client";
 
 import { useState } from "react";
+import { ChecklistPanel } from "@/components/ChecklistPanel";
 import { DeepDiveModal } from "@/components/DeepDiveModal";
+import { LectureNote } from "@/components/LectureNote";
 import { NotionExportModal } from "@/components/NotionExportModal";
 import { TranscriptPanel } from "@/components/TranscriptPanel";
 import { copyToClipboard, downloadTextFile } from "@/lib/export";
 import { renderMarkdown } from "@/lib/markdown";
-import type { AiResult, DraftBlock, TranscriptSegment } from "@/lib/types";
+import { exportLectureNoteToPdf } from "@/lib/pdfExport";
+import type { AiResult, ChecklistItem, DraftBlock, TranscriptSegment } from "@/lib/types";
 
 type ReviewPanelProps = {
   title: string;
   aiResult: AiResult;
   onSeek: (ms: number) => void;
-  onToggleChecklistItem: (id: string) => void;
+  onUpdateChecklist: (nextChecklist: ChecklistItem[]) => void;
   onUpdateLectureNote: (nextLectureNote: string) => void;
   onUpdateTranscript: (nextTranscript: TranscriptSegment[]) => void;
   onSegmentCommitted?: (oldText: string, newText: string) => void;
@@ -56,13 +59,14 @@ export function ReviewPanel({
   title,
   aiResult,
   onSeek,
-  onToggleChecklistItem,
+  onUpdateChecklist,
   onUpdateLectureNote,
   onUpdateTranscript,
   onSegmentCommitted,
 }: ReviewPanelProps) {
   const [summaryCopyLabel, setSummaryCopyLabel] = useState("클립보드 복사");
   const [noteCopyLabel, setNoteCopyLabel] = useState("클립보드 복사");
+  const [isExportingNotePdf, setIsExportingNotePdf] = useState(false);
 
   const [expandQuestion, setExpandQuestion] = useState("");
   const [isExpanding, setIsExpanding] = useState(false);
@@ -91,6 +95,18 @@ export function ReviewPanel({
   function handleDownloadNote(extension: "txt" | "md") {
     const mime = extension === "md" ? "text/markdown" : "text/plain";
     downloadTextFile(`lecture-note.${extension}`, buildLectureNoteExportContent(aiResult), mime);
+  }
+
+  async function handleDownloadNotePdf() {
+    if (isExportingNotePdf) return;
+    setIsExportingNotePdf(true);
+    try {
+      await exportLectureNoteToPdf(aiResult.lectureNote, title);
+    } catch (error) {
+      console.error("PDF 생성 실패:", error);
+    } finally {
+      setIsExportingNotePdf(false);
+    }
   }
 
   async function requestExpansion(question: string, replaceBlockId?: string) {
@@ -163,82 +179,96 @@ export function ReviewPanel({
 
   return (
     <div className="flex flex-col gap-4">
-      <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
+      <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-sm font-semibold text-zinc-900">AI 요약본</h2>
+          <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">AI 요약본</h2>
           <div className="flex gap-1.5">
             <button
               type="button"
               onClick={handleCopySummary}
-              className="rounded-full border border-zinc-200 px-3 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100"
+              className="rounded-full border border-zinc-200 px-3 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
             >
               {summaryCopyLabel}
             </button>
             <button
               type="button"
               onClick={() => handleDownloadSummary("txt")}
-              className="rounded-full border border-zinc-200 px-3 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100"
+              className="rounded-full border border-zinc-200 px-3 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
             >
               .txt 다운로드
             </button>
             <button
               type="button"
               onClick={() => handleDownloadSummary("md")}
-              className="rounded-full border border-zinc-200 px-3 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100"
+              className="rounded-full border border-zinc-200 px-3 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
             >
               .md 다운로드
             </button>
           </div>
         </div>
-        <div className="rounded-xl bg-zinc-50 p-3">
+        <div className="rounded-xl bg-zinc-50 p-3 dark:bg-zinc-800/60">
           {aiResult.summary ? renderMarkdown(aiResult.summary) : (
-            <p className="text-sm text-zinc-500">요약 내용이 없습니다.</p>
+            <p className="text-sm text-zinc-500 dark:text-zinc-400">요약 내용이 없습니다.</p>
           )}
         </div>
       </section>
 
-      <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
+      <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-sm font-semibold text-zinc-900">📖 상세 강의노트</h2>
+          <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">📖 상세 강의노트</h2>
           <div className="flex gap-1.5">
             <button
               type="button"
               onClick={handleCopyNote}
-              className="rounded-full border border-zinc-200 px-3 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100"
+              className="rounded-full border border-zinc-200 px-3 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
             >
               {noteCopyLabel}
             </button>
             <button
               type="button"
               onClick={() => handleDownloadNote("txt")}
-              className="rounded-full border border-zinc-200 px-3 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100"
+              className="rounded-full border border-zinc-200 px-3 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
             >
               .txt 다운로드
             </button>
             <button
               type="button"
               onClick={() => handleDownloadNote("md")}
-              className="rounded-full border border-zinc-200 px-3 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100"
+              className="rounded-full border border-zinc-200 px-3 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
             >
               .md 다운로드
             </button>
             <button
               type="button"
+              onClick={handleDownloadNotePdf}
+              disabled={isExportingNotePdf}
+              className="inline-flex items-center gap-1.5 rounded-full border border-zinc-200 px-3 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            >
+              {isExportingNotePdf ? (
+                <>
+                  <svg className="h-3 w-3 animate-spin" viewBox="0 0 24 24" fill="none">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                  PDF 생성 중...
+                </>
+              ) : (
+                ".pdf 다운로드"
+              )}
+            </button>
+            <button
+              type="button"
               onClick={() => setShowNotionModal(true)}
-              className="rounded-full border border-zinc-200 bg-zinc-900 px-3 py-1 text-xs font-medium text-white transition hover:bg-zinc-700"
+              className="rounded-full border border-zinc-200 bg-zinc-900 px-3 py-1 text-xs font-medium text-white transition hover:bg-zinc-700 dark:border-zinc-700"
             >
               🗂️ 노션으로 내보내기
             </button>
           </div>
         </div>
-        <div className="max-h-[32rem] overflow-y-auto rounded-xl bg-zinc-50 p-3">
-          {aiResult.lectureNote ? renderMarkdown(aiResult.lectureNote) : (
-            <p className="text-sm text-zinc-500">상세 강의노트가 없습니다.</p>
-          )}
-        </div>
+        <LectureNote markdown={aiResult.lectureNote} />
 
-        <div className="mt-3 border-t border-zinc-100 pt-3">
-          <p className="mb-1.5 text-xs font-medium text-zinc-500">🔍 더 알고 싶은 심화정보 / 추가 질문</p>
+        <div className="mt-3 border-t border-zinc-100 pt-3 dark:border-zinc-800">
+          <p className="mb-1.5 text-xs font-medium text-zinc-500 dark:text-zinc-400">🔍 더 알고 싶은 심화정보 / 추가 질문</p>
           <div className="flex gap-1.5">
             <input
               value={expandQuestion}
@@ -251,7 +281,7 @@ export function ReviewPanel({
               }}
               placeholder="[개념 정의 / 확장 설명 / 쉬운 예시] 예: 루비스코 효소의 작용 원리와 쉬운 비유"
               disabled={!aiResult.lectureNote}
-              className="flex-1 rounded-lg border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-indigo-300 disabled:cursor-not-allowed disabled:opacity-50"
+              className="flex-1 rounded-lg border border-zinc-200 bg-slate-100 px-3 py-2 text-sm text-slate-900 outline-none focus:border-indigo-300 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
             />
             <button
               type="button"
@@ -262,10 +292,10 @@ export function ReviewPanel({
               {isExpanding ? "탐구 중..." : "AI 심화 탐구 요청"}
             </button>
           </div>
-          <p className="mt-1.5 text-[11px] text-zinc-400">
+          <p className="mt-1.5 text-[11px] text-zinc-400 dark:text-zinc-500">
             💡 강의 내용 중 보강하고 싶은 학술 개념, 심층 원리, 실생활 예시를 입력하면 강의노트의 적절한 위치에 제안 블록을 생성합니다.
           </p>
-          {expandError && <p className="mt-1.5 text-xs text-red-600">{expandError}</p>}
+          {expandError && <p className="mt-1.5 text-xs text-red-600 dark:text-red-400">{expandError}</p>}
           {draftBlocks.length > 0 && !showModal && (
             <button
               type="button"
@@ -285,29 +315,9 @@ export function ReviewPanel({
         onSegmentCommitted={onSegmentCommitted}
       />
 
-      <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
-        <h2 className="mb-2 text-sm font-semibold text-zinc-900">체크리스트</h2>
-        {aiResult.checklist.length === 0 ? (
-          <p className="text-xs text-zinc-400">생성된 체크리스트가 없습니다.</p>
-        ) : (
-          <ul className="flex flex-col gap-1.5">
-            {aiResult.checklist.map((item) => (
-              <li key={item.id}>
-                <label className="flex cursor-pointer items-start gap-2 rounded-lg bg-zinc-50 px-3 py-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={item.done}
-                    onChange={() => onToggleChecklistItem(item.id)}
-                    className="mt-0.5 h-4 w-4 rounded border-zinc-300 text-indigo-600 focus:ring-indigo-500"
-                  />
-                  <span className={item.done ? "text-zinc-400 line-through" : "text-zinc-700"}>
-                    {item.text}
-                  </span>
-                </label>
-              </li>
-            ))}
-          </ul>
-        )}
+      <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+        <h2 className="mb-2 text-sm font-semibold text-zinc-900 dark:text-zinc-100">체크리스트</h2>
+        <ChecklistPanel checklist={aiResult.checklist} onChange={onUpdateChecklist} />
       </section>
 
       {showModal && (

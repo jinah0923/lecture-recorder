@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { Pagination } from "@/components/Pagination";
 import { formatDuration } from "@/lib/format";
 import type { TranscriptSegment } from "@/lib/types";
 
@@ -14,6 +15,35 @@ type TranscriptPanelProps = {
 };
 
 const AUTOSAVE_DEBOUNCE_MS = 300;
+// UI-only pagination — onTranscriptChange/onSegmentCommitted above always
+// receive/operate on the full `transcript` array regardless of which page
+// is currently shown, so search/edit/export/autosave never see a slice.
+// Character-count based (not a fixed segment count), counting spaces.
+const CHARS_PER_PAGE = 1000;
+
+// Accumulates whole segments onto a page until the next one would push the
+// page past CHARS_PER_PAGE, then starts a new page — mirrors LectureNote's
+// section-based pagination so a page holds a consistent amount of reading.
+function paginateSegments(segments: TranscriptSegment[]): TranscriptSegment[][] {
+  if (segments.length === 0) return [[]];
+
+  const pages: TranscriptSegment[][] = [];
+  let currentSegments: TranscriptSegment[] = [];
+  let currentLength = 0;
+
+  for (const segment of segments) {
+    if (currentSegments.length > 0 && currentLength + segment.text.length > CHARS_PER_PAGE) {
+      pages.push(currentSegments);
+      currentSegments = [];
+      currentLength = 0;
+    }
+    currentSegments.push(segment);
+    currentLength += segment.text.length;
+  }
+  if (currentSegments.length > 0) pages.push(currentSegments);
+
+  return pages;
+}
 
 function highlightText(text: string, query: string): ReactNode {
   if (!query.trim()) return text;
@@ -21,7 +51,7 @@ function highlightText(text: string, query: string): ReactNode {
   const parts = text.split(new RegExp(`(${escaped})`, "gi"));
   return parts.map((part, index) =>
     part.toLowerCase() === query.toLowerCase() ? (
-      <mark key={index} className="rounded bg-yellow-200 px-0.5">
+      <mark key={index} className="rounded bg-yellow-200 px-0.5 dark:bg-yellow-500/40 dark:text-yellow-100">
         {part}
       </mark>
     ) : (
@@ -37,6 +67,7 @@ export function TranscriptPanel({
   onSegmentCommitted,
 }: TranscriptPanelProps) {
   const [query, setQuery] = useState("");
+  const [page, setPage] = useState(1);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftText, setDraftText] = useState("");
   // isSaving reflects only "is a debounce timer currently pending" — it is
@@ -48,6 +79,7 @@ export function TranscriptPanel({
   const debounceRef = useRef<number | null>(null);
   const segmentRefs = useRef(new Map<string, HTMLDivElement>());
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const cardRef = useRef<HTMLElement>(null);
   // Tracks the last text WE committed for the segment being edited — used
   // instead of re-reading the `transcript` prop, which can still reflect a
   // stale value for a moment after onTranscriptChange schedules a parent
@@ -75,20 +107,57 @@ export function TranscriptPanel({
     el.style.height = `${el.scrollHeight}px`;
   }, [editingId]);
 
-  const firstMatchId = (() => {
+  // Recomputing pagination the instant a debounced autosave commits (while
+  // the user is still mid-edit, textarea focused) could shift the edited
+  // segment onto a different page and unmount its textarea out from under
+  // them. So pagination is frozen to its pre-edit snapshot for the duration
+  // of an edit, and only re-synced once editing stops (see effect below).
+  const lastStableTranscriptRef = useRef<TranscriptSegment[]>(transcript);
+  useEffect(() => {
+    if (!editingId) lastStableTranscriptRef.current = transcript;
+  }, [transcript, editingId]);
+
+  const segmentPages = useMemo(
+    () => paginateSegments(editingId ? lastStableTranscriptRef.current : transcript),
+    [editingId, transcript],
+  );
+  const totalPages = segmentPages.length;
+  const currentPage = Math.min(page, totalPages);
+  const visibleSegments = segmentPages[currentPage - 1] ?? [];
+
+  // A fresh transcript (new analysis) should land back on page 1 rather
+  // than an out-of-range page left over from the previous one.
+  useEffect(() => {
+    setPage(1);
+  }, [transcript.length]);
+
+  const firstMatchId = useMemo(() => {
     if (!query.trim()) return null;
     const lowered = query.toLowerCase();
     return transcript.find((segment) => segment.text.toLowerCase().includes(lowered))?.id ?? null;
-  })();
+  }, [transcript, query]);
 
-  function handleSearchChange(value: string) {
-    setQuery(value);
-    if (!value.trim()) return;
-    const lowered = value.toLowerCase();
-    const match = transcript.find((segment) => segment.text.toLowerCase().includes(lowered));
-    if (match) {
-      segmentRefs.current.get(match.id)?.scrollIntoView({ behavior: "smooth", block: "center" });
-    }
+  // Search jumps to whichever page holds the match, then scrolls to it once
+  // that page has actually rendered (hence splitting into two effects).
+  useEffect(() => {
+    if (!firstMatchId) return;
+    const pageIndex = segmentPages.findIndex((pageSegments) => pageSegments.some((segment) => segment.id === firstMatchId));
+    if (pageIndex === -1) return;
+    setPage(pageIndex + 1);
+  }, [firstMatchId, segmentPages]);
+
+  useEffect(() => {
+    if (!firstMatchId) return;
+    segmentRefs.current.get(firstMatchId)?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [firstMatchId, page]);
+
+  function scrollToTop() {
+    cardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function goToPage(next: number) {
+    setPage(next);
+    scrollToTop();
   }
 
   // Pure local state update — no network/AI call. try/finally guarantees
@@ -161,11 +230,11 @@ export function TranscriptPanel({
   }
 
   return (
-    <section className="flex min-h-0 flex-col rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
+    <section ref={cardRef} className="flex min-h-0 flex-col rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
       <div className="mb-2 flex items-center justify-between gap-2">
-        <h2 className="text-sm font-semibold text-zinc-900">변환된 스크립트</h2>
+        <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">변환된 스크립트</h2>
         {(isSaving || hasSavedOnce) && (
-          <span className={`text-[11px] font-medium ${isSaving ? "text-zinc-400" : "text-emerald-600"}`}>
+          <span className={`text-[11px] font-medium ${isSaving ? "text-zinc-400 dark:text-zinc-500" : "text-emerald-600 dark:text-emerald-400"}`}>
             {isSaving ? "수정 중..." : "저장됨 ✓"}
           </span>
         )}
@@ -173,16 +242,16 @@ export function TranscriptPanel({
       <input
         type="search"
         value={query}
-        onChange={(event) => handleSearchChange(event.target.value)}
+        onChange={(event) => setQuery(event.target.value)}
         placeholder="스크립트에서 검색..."
-        className="mb-2 w-full rounded-lg border border-zinc-200 px-3 py-1.5 text-sm outline-none focus:border-indigo-300"
+        className="mb-2 w-full rounded-lg border border-zinc-200 bg-slate-100 px-3 py-1.5 text-sm text-slate-900 outline-none focus:border-indigo-300 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
       />
       {query.trim() && !firstMatchId && (
-        <p className="mb-2 text-xs text-zinc-400">일치하는 내용이 없습니다.</p>
+        <p className="mb-2 text-xs text-zinc-400 dark:text-zinc-500">일치하는 내용이 없습니다.</p>
       )}
-      <p className="mb-2 text-[11px] text-zinc-400">💡 텍스트를 클릭하면 오타를 직접 수정할 수 있어요.</p>
-      <div className="max-h-72 overflow-y-auto rounded-xl border border-zinc-100 p-2">
-        {transcript.map((segment) => (
+      <p className="mb-2 text-[11px] text-zinc-400 dark:text-zinc-500">💡 텍스트를 클릭하면 오타를 직접 수정할 수 있어요.</p>
+      <div className="max-h-72 overflow-y-auto rounded-xl border border-zinc-100 p-2 dark:border-zinc-800">
+        {visibleSegments.map((segment) => (
           <div
             key={segment.id}
             ref={(el) => {
@@ -190,14 +259,14 @@ export function TranscriptPanel({
               else segmentRefs.current.delete(segment.id);
             }}
             className={`mb-1 flex items-start gap-2 rounded-lg px-1 py-1 ${
-              segment.id === firstMatchId ? "bg-yellow-50" : ""
+              segment.id === firstMatchId ? "bg-yellow-50 dark:bg-yellow-500/10" : ""
             }`}
           >
             <button
               type="button"
               onClick={() => onSeek(segment.startMs)}
               title="이 지점으로 이동"
-              className="mt-0.5 shrink-0 rounded px-1 py-0.5 font-mono text-xs text-zinc-400 transition hover:bg-indigo-100 hover:text-indigo-600"
+              className="mt-0.5 shrink-0 rounded px-1 py-0.5 font-mono text-xs text-zinc-400 transition hover:bg-indigo-100 hover:text-indigo-600 dark:text-zinc-500 dark:hover:bg-indigo-950/50 dark:hover:text-indigo-400"
             >
               {formatDuration(segment.startMs)}
             </button>
@@ -215,13 +284,13 @@ export function TranscriptPanel({
                 }}
                 onBlur={flushAndStopEditing}
                 onKeyDown={handleKeyDown}
-                className="flex-1 resize-none overflow-hidden rounded-lg border border-indigo-300 bg-white px-2 py-1 text-sm text-zinc-700 outline-none"
+                className="flex-1 resize-none overflow-hidden rounded-lg border border-indigo-300 bg-white px-2 py-1 text-sm text-zinc-700 outline-none dark:border-indigo-700 dark:bg-zinc-800 dark:text-zinc-100"
               />
             ) : (
               <p
                 onClick={() => startEditing(segment)}
                 title="클릭해서 수정"
-                className="flex-1 cursor-text rounded-lg px-2 py-1 text-sm text-zinc-700 transition hover:bg-zinc-50"
+                className="flex-1 cursor-text rounded-lg px-2 py-1 text-sm text-zinc-700 transition hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800/60"
               >
                 {highlightText(segment.text, query)}
               </p>
@@ -229,6 +298,7 @@ export function TranscriptPanel({
           </div>
         ))}
       </div>
+      <Pagination page={currentPage} totalPages={totalPages} onPageChange={goToPage} onTop={scrollToTop} />
     </section>
   );
 }

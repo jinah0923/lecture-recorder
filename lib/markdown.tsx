@@ -1,10 +1,24 @@
 import type { ReactNode } from "react";
 
 const CALLOUT_STYLES: Array<{ emoji: string; className: string }> = [
-  { emoji: "🔥", className: "border-red-200 bg-red-50 text-red-800" },
-  { emoji: "💡", className: "border-amber-200 bg-amber-50 text-amber-800" },
-  { emoji: "🗣️", className: "border-sky-200 bg-sky-50 text-sky-800" },
-  { emoji: "💜", className: "border-violet-200 bg-violet-50 text-violet-800" },
+  {
+    emoji: "🔥",
+    className: "border-red-200 bg-red-50 text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-300",
+  },
+  {
+    emoji: "💡",
+    className:
+      "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-300",
+  },
+  {
+    emoji: "🗣️",
+    className: "border-sky-200 bg-sky-50 text-sky-800 dark:border-sky-900/50 dark:bg-sky-950/40 dark:text-sky-300",
+  },
+  {
+    emoji: "💜",
+    className:
+      "border-violet-200 bg-violet-50 text-violet-800 dark:border-violet-900/50 dark:bg-violet-950/40 dark:text-violet-300",
+  },
 ];
 
 // The AI is prompted to write selective callouts as a blockquote line
@@ -29,9 +43,9 @@ function renderInline(text: string): ReactNode[] {
 }
 
 function headingClassName(level: number) {
-  if (level === 1) return "text-base font-semibold text-zinc-900";
-  if (level === 2) return "text-sm font-semibold text-zinc-900";
-  return "text-sm font-medium text-zinc-700";
+  if (level === 1) return "text-base font-semibold text-zinc-900 dark:text-zinc-100";
+  if (level === 2) return "text-sm font-semibold text-zinc-900 dark:text-zinc-100";
+  return "text-sm font-medium text-zinc-700 dark:text-zinc-300";
 }
 
 function splitTableRow(line: string): string[] {
@@ -74,7 +88,7 @@ export function renderMarkdown(markdown: string): ReactNode {
             }
             return (
               <ul key={itemIndex} className="ml-4 list-disc">
-                <li className="text-sm text-zinc-700">{renderInline(item)}</li>
+                <li className="text-sm text-zinc-700 dark:text-zinc-300">{renderInline(item)}</li>
               </ul>
             );
           })}
@@ -86,7 +100,7 @@ export function renderMarkdown(markdown: string): ReactNode {
     blocks.push(
       <ul key={`ul-${key}`} className="ml-4 list-disc space-y-1">
         {items.map((item, itemIndex) => (
-          <li key={itemIndex} className="text-sm text-zinc-700">
+          <li key={itemIndex} className="text-sm text-zinc-700 dark:text-zinc-300">
             {renderInline(item)}
           </li>
         ))}
@@ -115,14 +129,14 @@ export function renderMarkdown(markdown: string): ReactNode {
         cursor++;
       }
       blocks.push(
-        <div key={`table-${index}`} className="my-1 overflow-x-auto rounded-lg border border-zinc-200">
+        <div key={`table-${index}`} className="my-1 overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-800">
           <table className="w-full border-collapse text-left text-sm">
-            <thead className="bg-zinc-50">
+            <thead className="bg-zinc-50 dark:bg-zinc-900">
               <tr>
                 {headerCells.map((cell, cellIndex) => (
                   <th
                     key={cellIndex}
-                    className="border-b border-zinc-200 px-3 py-1.5 font-semibold text-zinc-700"
+                    className="border-b border-zinc-200 px-3 py-1.5 font-semibold text-zinc-700 dark:border-zinc-800 dark:text-zinc-300"
                   >
                     {renderInline(cell)}
                   </th>
@@ -131,9 +145,9 @@ export function renderMarkdown(markdown: string): ReactNode {
             </thead>
             <tbody>
               {bodyRows.map((row, rowIndex) => (
-                <tr key={rowIndex} className="border-b border-zinc-100 last:border-0">
+                <tr key={rowIndex} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/60">
                   {row.map((cell, cellIndex) => (
-                    <td key={cellIndex} className="px-3 py-1.5 text-zinc-600">
+                    <td key={cellIndex} className="px-3 py-1.5 text-zinc-600 dark:text-zinc-400">
                       {renderInline(cell)}
                     </td>
                   ))}
@@ -196,7 +210,7 @@ export function renderMarkdown(markdown: string): ReactNode {
     }
 
     blocks.push(
-      <p key={index} className="text-sm text-zinc-700">
+      <p key={index} className="text-sm text-zinc-700 dark:text-zinc-300">
         {renderInline(line)}
       </p>,
     );

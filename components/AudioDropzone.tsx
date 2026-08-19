@@ -40,7 +40,7 @@ export function AudioDropzone({ audio, disabled, onAudioChange, onClear }: Audio
 
   return (
     <div>
-      <p className="mb-2 text-xs font-medium uppercase tracking-wide text-zinc-500">
+      <p className="mb-2 text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
         Audio file
       </p>
       <div
@@ -65,11 +65,11 @@ export function AudioDropzone({ audio, disabled, onAudioChange, onClear }: Audio
         }}
         className={`flex w-full cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed px-4 py-8 text-center transition ${
           isDragging
-            ? "border-indigo-400 bg-indigo-50"
-            : "border-zinc-200 bg-zinc-50 hover:border-zinc-300 hover:bg-zinc-100/70"
+            ? "border-indigo-400 bg-indigo-50 dark:border-indigo-600 dark:bg-indigo-950/30"
+            : "border-zinc-200 bg-zinc-50 hover:border-zinc-300 hover:bg-zinc-100/70 dark:border-zinc-800 dark:bg-zinc-800/40 dark:hover:border-zinc-700 dark:hover:bg-zinc-800/70"
         } ${disabled ? "cursor-not-allowed opacity-50" : ""}`}
       >
-        <span className="mb-2 flex h-10 w-10 items-center justify-center rounded-full bg-white text-zinc-500 shadow-sm">
+        <span className="mb-2 flex h-10 w-10 items-center justify-center rounded-full bg-white text-zinc-500 shadow-sm dark:bg-zinc-900 dark:text-zinc-400">
           <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8">
             <path d="M12 16V4" strokeLinecap="round" />
             <path d="M8 8l4-4 4 4" strokeLinecap="round" strokeLinejoin="round" />
@@ -79,8 +79,8 @@ export function AudioDropzone({ audio, disabled, onAudioChange, onClear }: Audio
         {audio ? (
           <div className="flex w-full max-w-full items-start justify-center gap-2 px-2">
             <div className="min-w-0">
-              <p className="truncate text-sm font-medium text-zinc-800">{audio.name}</p>
-              <p className="mt-1 text-xs text-zinc-500">{audio.sizeLabel} · click or drop to replace</p>
+              <p className="truncate text-sm font-medium text-zinc-800 dark:text-zinc-200">{audio.name}</p>
+              <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{audio.sizeLabel} · click or drop to replace</p>
             </div>
             <button
               type="button"
@@ -90,7 +90,7 @@ export function AudioDropzone({ audio, disabled, onAudioChange, onClear }: Audio
               }}
               disabled={disabled}
               aria-label="첨부 파일 제거"
-              className="shrink-0 rounded-full p-1.5 text-zinc-400 transition hover:bg-red-50 hover:text-red-500 disabled:cursor-not-allowed disabled:opacity-40"
+              className="shrink-0 rounded-full p-1.5 text-zinc-400 transition hover:bg-red-50 hover:text-red-500 disabled:cursor-not-allowed disabled:opacity-40 dark:text-zinc-500 dark:hover:bg-red-950/40 dark:hover:text-red-400"
             >
               <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M6 6l12 12M18 6L6 18" strokeLinecap="round" />
@@ -99,8 +99,8 @@ export function AudioDropzone({ audio, disabled, onAudioChange, onClear }: Audio
           </div>
         ) : (
           <>
-            <p className="text-sm font-medium text-zinc-800">Drop an audio file</p>
-            <p className="mt-1 text-xs text-zinc-500">MP3, WAV, M4A, or WebM</p>
+            <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200">Drop an audio file</p>
+            <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">MP3, WAV, M4A, or WebM</p>
           </>
         )}
       </div>

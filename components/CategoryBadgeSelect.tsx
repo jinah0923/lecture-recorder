@@ -75,7 +75,7 @@ export function CategoryBadgeSelect({
       <button
         type="button"
         onClick={() => setOpen((prev) => !prev)}
-        className="inline-flex items-center gap-1 rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700 transition hover:bg-indigo-100"
+        className="inline-flex items-center gap-1 rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700 transition hover:bg-indigo-100 dark:border-indigo-900 dark:bg-indigo-950/40 dark:text-indigo-300 dark:hover:bg-indigo-950/70"
       >
         {category}
         <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2">
@@ -84,15 +84,15 @@ export function CategoryBadgeSelect({
       </button>
 
       {open && (
-        <div className="absolute left-0 top-full z-20 mt-1 w-52 rounded-xl border border-zinc-200 bg-white p-1.5 shadow-lg">
+        <div className="absolute left-0 top-full z-20 mt-1 w-52 rounded-xl border border-zinc-200 bg-white p-1.5 shadow-lg dark:border-zinc-800 dark:bg-zinc-900">
           <ul className="max-h-48 overflow-y-auto">
             {categories.map((name) => (
               <li key={name}>
                 <button
                   type="button"
                   onClick={() => handleSelect(name)}
-                  className={`flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-left text-sm transition hover:bg-zinc-100 ${
-                    name === category ? "font-medium text-indigo-600" : "text-zinc-700"
+                  className={`flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-left text-sm transition hover:bg-zinc-100 dark:hover:bg-zinc-800 ${
+                    name === category ? "font-medium text-indigo-600 dark:text-indigo-400" : "text-zinc-700 dark:text-zinc-300"
                   }`}
                 >
                   <span className="truncate">{name}</span>
@@ -112,7 +112,7 @@ export function CategoryBadgeSelect({
             ))}
           </ul>
 
-          <div className="mt-1 border-t border-zinc-100 pt-1">
+          <div className="mt-1 border-t border-zinc-100 pt-1 dark:border-zinc-800">
             {creating ? (
               <form onSubmit={handleCreateSubmit} className="flex flex-col gap-1.5 px-1 py-1">
                 <input
@@ -123,9 +123,9 @@ export function CategoryBadgeSelect({
                     setError(null);
                   }}
                   placeholder="새 카테고리 이름"
-                  className="w-full rounded-lg border border-zinc-200 px-2 py-1 text-sm outline-none focus:border-indigo-300"
+                  className="w-full rounded-lg border border-zinc-200 bg-slate-100 px-2 py-1 text-sm text-slate-900 outline-none focus:border-indigo-300 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                 />
-                {error && <p className="text-[11px] text-red-600">{error}</p>}
+                {error && <p className="text-[11px] text-red-600 dark:text-red-400">{error}</p>}
                 <div className="flex justify-end gap-1">
                   <button
                     type="button"
@@ -133,7 +133,7 @@ export function CategoryBadgeSelect({
                       setCreating(false);
                       setError(null);
                     }}
-                    className="rounded-full px-2.5 py-1 text-xs text-zinc-500 hover:bg-zinc-100"
+                    className="rounded-full px-2.5 py-1 text-xs text-zinc-500 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
                   >
                     취소
                   </button>
@@ -149,7 +149,7 @@ export function CategoryBadgeSelect({
               <button
                 type="button"
                 onClick={() => setCreating(true)}
-                className="flex w-full items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-left text-sm text-indigo-600 transition hover:bg-indigo-50"
+                className="flex w-full items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-left text-sm text-indigo-600 transition hover:bg-indigo-50 dark:text-indigo-400 dark:hover:bg-indigo-950/40"
               >
                 + 새 카테고리로 이동
               </button>

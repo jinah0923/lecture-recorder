@@ -11,13 +11,13 @@ export function ReattachAudioPrompt({ audioFileName, onFileSelected }: ReattachA
   const inputRef = useRef<HTMLInputElement>(null);
 
   return (
-    <div className="flex flex-col items-center gap-3 rounded-2xl border border-dashed border-zinc-200 bg-white p-6 text-center shadow-sm">
-      <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-zinc-100 text-xl">📁</span>
+    <div className="flex flex-col items-center gap-3 rounded-2xl border border-dashed border-zinc-200 bg-white p-6 text-center shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+      <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-zinc-100 text-xl dark:bg-zinc-800">📁</span>
       <div>
-        <p className="text-sm font-medium text-zinc-700">오디오가 기기에 저장되어 있어요</p>
-        <p className="mt-1 text-xs text-zinc-400">
+        <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">오디오가 기기에 저장되어 있어요</p>
+        <p className="mt-1 text-xs text-zinc-400 dark:text-zinc-500">
           다운로드 폴더에서{" "}
-          <span className="font-mono text-zinc-600">{audioFileName || "저장된 파일"}</span>
+          <span className="font-mono text-zinc-600 dark:text-zinc-400">{audioFileName || "저장된 파일"}</span>
           {" "}을(를) 찾아 다시 선택해주세요
         </p>
       </div>

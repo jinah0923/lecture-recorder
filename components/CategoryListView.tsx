@@ -31,29 +31,29 @@ export function CategoryListView({
       </div>
 
       {sessions.length === 0 ? (
-        <div className="flex flex-1 flex-col items-center justify-center rounded-2xl border border-dashed border-zinc-200 bg-white px-4 py-16 text-center">
-          <p className="text-sm font-medium text-zinc-700">아직 녹음이 없어요</p>
-          <p className="mt-1 text-xs text-zinc-400">이 카테고리에 첫 녹음을 추가해보세요</p>
+        <div className="flex flex-1 flex-col items-center justify-center rounded-2xl border border-dashed border-zinc-200 bg-white px-4 py-16 text-center dark:border-zinc-800 dark:bg-zinc-900">
+          <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">아직 녹음이 없어요</p>
+          <p className="mt-1 text-xs text-zinc-400 dark:text-zinc-500">이 카테고리에 첫 녹음을 추가해보세요</p>
         </div>
       ) : (
         <ul className="flex flex-col gap-2">
           {sessions.map((session) => (
             <li
               key={session.id}
-              className="flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 shadow-sm transition hover:border-indigo-200"
+              className="flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 shadow-sm transition hover:border-indigo-200 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-indigo-900"
             >
               <button
                 type="button"
                 onClick={() => onSelectSession(session)}
                 className="min-w-0 flex-1 text-left"
               >
-                <p className="truncate text-sm font-medium text-zinc-900">{session.title}</p>
-                <p className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-zinc-500">
+                <p className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">{session.title}</p>
+                <p className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400">
                   <span>{formatDateTime(session.updatedAt)}</span>
                   <span>·</span>
                   <span className="font-mono">{formatDuration(session.durationMs)}</span>
                   {session.hasAiResult && (
-                    <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700">
+                    <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400">
                       요약 완료
                     </span>
                   )}
@@ -63,7 +63,7 @@ export function CategoryListView({
                 type="button"
                 onClick={() => onDeleteSession(session.id)}
                 aria-label="녹음 삭제"
-                className="shrink-0 rounded-full p-1.5 text-zinc-400 transition hover:bg-red-50 hover:text-red-500"
+                className="shrink-0 rounded-full p-1.5 text-zinc-400 transition hover:bg-red-50 hover:text-red-500 dark:text-zinc-500 dark:hover:bg-red-950/40 dark:hover:text-red-400"
               >
                 <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8">
                   <path

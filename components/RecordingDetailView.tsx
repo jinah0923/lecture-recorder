@@ -258,16 +258,8 @@ export function RecordingDetailView({
     }
   }
 
-  const toggleChecklistItem = useCallback((id: string) => {
-    setAiResult((current) => {
-      if (!current) return current;
-      return {
-        ...current,
-        checklist: current.checklist.map((item) =>
-          item.id === id ? { ...item, done: !item.done } : item,
-        ),
-      };
-    });
+  const updateChecklist = useCallback((nextChecklist: ChecklistItem[]) => {
+    setAiResult((current) => (current ? { ...current, checklist: nextChecklist } : current));
   }, []);
 
   const updateLectureNote = useCallback((nextLectureNote: string) => {
@@ -327,15 +319,15 @@ export function RecordingDetailView({
 
   if (!hydrated) {
     return (
-      <div className="flex flex-1 items-center justify-center text-sm text-zinc-400">불러오는 중...</div>
+      <div className="flex flex-1 items-center justify-center text-sm text-zinc-400 dark:text-zinc-500">불러오는 중...</div>
     );
   }
 
   if (notFound) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center text-sm text-zinc-400">
+      <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center text-sm text-zinc-400 dark:text-zinc-500">
         <p>녹음을 찾을 수 없습니다.</p>
-        <button type="button" onClick={onBack} className="text-indigo-600 underline">
+        <button type="button" onClick={onBack} className="text-indigo-600 underline dark:text-indigo-400">
           목록으로 돌아가기
         </button>
       </div>
@@ -348,7 +340,7 @@ export function RecordingDetailView({
         <button
           type="button"
           onClick={onBack}
-          className="mb-3 inline-flex items-center gap-1 text-sm font-medium text-zinc-600 transition hover:text-zinc-900"
+          className="mb-3 inline-flex items-center gap-1 text-sm font-medium text-zinc-600 transition hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
         >
           <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
             <path d="M15 18l-6-6 6-6" strokeLinecap="round" strokeLinejoin="round" />
@@ -359,10 +351,10 @@ export function RecordingDetailView({
           value={title}
           onChange={(event) => setTitle(event.target.value)}
           placeholder="녹음 제목"
-          className="w-full rounded-lg border border-transparent bg-transparent px-1 py-0.5 text-xl font-semibold tracking-tight text-zinc-900 outline-none transition hover:border-zinc-200 focus:border-indigo-300 focus:bg-white"
+          className="w-full rounded-lg border border-transparent bg-transparent px-1 py-0.5 text-xl font-semibold tracking-tight text-zinc-900 outline-none transition hover:border-zinc-200 focus:border-indigo-300 focus:bg-white dark:text-zinc-100 dark:hover:border-zinc-700 dark:focus:bg-zinc-900"
         />
         <div className="mt-0.5 flex flex-wrap items-center gap-2 px-1">
-          <p className="text-xs text-zinc-500">{formatDateTime(createdAt)}</p>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">{formatDateTime(createdAt)}</p>
           <CategoryBadgeSelect
             category={category}
             categories={categories}
@@ -375,13 +367,13 @@ export function RecordingDetailView({
             {keywords.map((word) => (
               <span
                 key={word}
-                className="rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] font-medium text-zinc-600"
+                className="rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
               >
                 #{word}
               </span>
             ))}
             {referenceFileName && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700">
+              <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:bg-amber-950/40 dark:text-amber-400">
                 📎 {referenceFileName}
               </span>
             )}
@@ -407,7 +399,7 @@ export function RecordingDetailView({
             subtitle="STT 교정에 활용돼요"
             badge={
               keywords.length > 0 ? (
-                <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-medium text-indigo-600">
+                <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-medium text-indigo-600 dark:bg-indigo-950/50 dark:text-indigo-400">
                   {keywords.length}
                 </span>
               ) : undefined
@@ -421,7 +413,7 @@ export function RecordingDetailView({
             subtitle="PDF, TXT, 이미지 강의안"
             badge={
               referenceDoc ? (
-                <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-medium text-emerald-600">
+                <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-medium text-emerald-600 dark:bg-emerald-950/50 dark:text-emerald-400">
                   첨부됨
                 </span>
               ) : undefined
@@ -437,12 +429,12 @@ export function RecordingDetailView({
       )}
 
       {!aiResult && (
-        <div className="rounded-2xl border border-zinc-200 bg-white p-4 shadow-sm">
+        <div className="rounded-2xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
           <button
             type="button"
             onClick={handleAnalyze}
             disabled={isAnalyzing || !localAudio}
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:bg-indigo-300"
+            className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:bg-indigo-300 dark:disabled:bg-indigo-900"
           >
             {isAnalyzing ? (
               <>
@@ -456,12 +448,12 @@ export function RecordingDetailView({
             )}
           </button>
           {analyzeError && (
-            <p className="mt-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">{analyzeError}</p>
+            <p className="mt-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600 dark:bg-red-950/40 dark:text-red-400">{analyzeError}</p>
           )}
         </div>
       )}
 
-      <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
+      <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
         <BookmarkPanel
           bookmarks={bookmarks}
           elapsedMs={0}
@@ -479,7 +471,7 @@ export function RecordingDetailView({
           title={title || "제목 없는 강의"}
           aiResult={aiResult}
           onSeek={seekTo}
-          onToggleChecklistItem={toggleChecklistItem}
+          onUpdateChecklist={updateChecklist}
           onUpdateLectureNote={updateLectureNote}
           onUpdateTranscript={updateTranscript}
           onSegmentCommitted={handleSegmentCommitted}
@@ -487,7 +479,7 @@ export function RecordingDetailView({
       )}
 
       {syncToast && (
-        <div className="fixed right-4 top-4 z-50 max-w-sm rounded-xl bg-zinc-900 px-4 py-3 text-sm text-white shadow-lg">
+        <div className="fixed right-4 top-16 z-50 max-w-sm rounded-xl bg-zinc-900 px-4 py-3 text-sm text-white shadow-lg dark:bg-zinc-800">
           {syncToast}
         </div>
       )}

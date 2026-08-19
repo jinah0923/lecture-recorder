@@ -51,15 +51,15 @@ export function ReferenceDocDropzone({ document, onDocumentChange, onClear }: Re
         }}
         className={`flex w-full cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed px-4 py-6 text-center transition ${
           isDragging
-            ? "border-indigo-400 bg-indigo-50"
-            : "border-zinc-200 bg-zinc-50 hover:border-zinc-300 hover:bg-zinc-100/70"
+            ? "border-indigo-400 bg-indigo-50 dark:border-indigo-600 dark:bg-indigo-950/30"
+            : "border-zinc-200 bg-zinc-50 hover:border-zinc-300 hover:bg-zinc-100/70 dark:border-zinc-800 dark:bg-zinc-800/40 dark:hover:border-zinc-700 dark:hover:bg-zinc-800/70"
         }`}
       >
         {document ? (
           <div className="flex w-full max-w-full items-start justify-center gap-2 px-2">
             <div className="min-w-0">
-              <p className="truncate text-sm font-medium text-zinc-800">{document.name}</p>
-              <p className="mt-1 text-xs text-zinc-500">{document.sizeLabel} · click or drop to replace</p>
+              <p className="truncate text-sm font-medium text-zinc-800 dark:text-zinc-200">{document.name}</p>
+              <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{document.sizeLabel} · click or drop to replace</p>
             </div>
             <button
               type="button"
@@ -68,7 +68,7 @@ export function ReferenceDocDropzone({ document, onDocumentChange, onClear }: Re
                 onClear();
               }}
               aria-label="첨부 자료 제거"
-              className="shrink-0 rounded-full p-1.5 text-zinc-400 transition hover:bg-red-50 hover:text-red-500"
+              className="shrink-0 rounded-full p-1.5 text-zinc-400 transition hover:bg-red-50 hover:text-red-500 dark:text-zinc-500 dark:hover:bg-red-950/40 dark:hover:text-red-400"
             >
               <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M6 6l12 12M18 6L6 18" strokeLinecap="round" />
@@ -77,8 +77,8 @@ export function ReferenceDocDropzone({ document, onDocumentChange, onClear }: Re
           </div>
         ) : (
           <>
-            <p className="text-sm font-medium text-zinc-800">강의안 파일을 올려주세요</p>
-            <p className="mt-1 text-xs text-zinc-500">PDF, TXT, 이미지 (PPT는 PDF로 변환 후 업로드)</p>
+            <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200">강의안 파일을 올려주세요</p>
+            <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">PDF, TXT, 이미지 (PPT는 PDF로 변환 후 업로드)</p>
           </>
         )}
       </div>

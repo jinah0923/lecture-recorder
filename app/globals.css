@@ -1,5 +1,11 @@
 @import "tailwindcss";
 
+/* Tailwind v4 is CSS-first (no tailwind.config.js in this project), so
+   class-based dark mode — the v4 equivalent of v3's `darkMode: 'class'` —
+   is declared here instead: `dark:` variants apply whenever a `.dark`
+   class is present on `<html>` or an ancestor, driven by next-themes. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 @theme {
   --font-sans: "Segoe UI", ui-sans-serif, system-ui, sans-serif;
   --color-ink: #18181b;
@@ -15,11 +21,6 @@
 html,
 body {
   min-height: 100%;
-}
-
-body {
-  background: var(--color-canvas);
-  color: var(--color-ink);
 }
 
 @keyframes pulse-dot {

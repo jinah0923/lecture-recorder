@@ -78,7 +78,7 @@ export function NewRecordingView({
         value={category}
         onChange={(event) => setCategory(event.target.value)}
         placeholder="카테고리"
-        className="w-40 rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-sm text-zinc-600 outline-none focus:border-indigo-300"
+        className="w-40 rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-sm text-zinc-600 outline-none focus:border-indigo-300 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300"
       />
       <datalist id="category-options-new">
         {categories.map((name) => (
@@ -86,9 +86,9 @@ export function NewRecordingView({
         ))}
       </datalist>
 
-      <section className="flex flex-col gap-4 rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
+      <section className="flex flex-col gap-4 rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
         <div>
-          <h2 className="text-sm font-semibold text-zinc-900">녹음 / 업로드</h2>
+          <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">녹음 / 업로드</h2>
           <RecorderControls
             elapsedMs={elapsedMs}
             isRecording={isRecording}
@@ -98,10 +98,10 @@ export function NewRecordingView({
           />
         </div>
 
-        <div className="flex items-center gap-3 text-xs text-zinc-400">
-          <div className="h-px flex-1 bg-zinc-200" />
+        <div className="flex items-center gap-3 text-xs text-zinc-400 dark:text-zinc-500">
+          <div className="h-px flex-1 bg-zinc-200 dark:bg-zinc-800" />
           또는
-          <div className="h-px flex-1 bg-zinc-200" />
+          <div className="h-px flex-1 bg-zinc-200 dark:bg-zinc-800" />
         </div>
 
         <AudioDropzone
