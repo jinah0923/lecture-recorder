@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { GoogleGenAI, Type, createPartFromUri, createUserContent } from "@google/genai";
+import { ApiError, GoogleGenAI, Type, createPartFromUri, createUserContent } from "@google/genai";
 import type { File as GenAiFile } from "@google/genai";
 
 export const runtime = "nodejs";
@@ -28,7 +28,7 @@ type ChecklistItem = {
   done: boolean;
 };
 
-const MODEL = "gemini-1.5-flash";
+const MODEL = "gemini-3.6-flash";
 // Files are uploaded via the Gemini Files API (not inline base64), which
 // supports up to 2GB per file — so these caps are just sane upper bounds for
 // a lecture recording (2-3h of Opus audio) and a reference document, not a
@@ -52,23 +52,27 @@ const RESPONSE_SCHEMA = {
     },
     transcript: {
       type: Type.ARRAY,
+      description:
+        "발화 내용을 15~30초 분량의 자연스러운 1~2개 완성 문장 단위로 묶은 구간별 받아쓰기. 단어나 짧은 어절 단위로 잘게 쪼개지 말 것.",
       items: {
         type: Type.OBJECT,
         properties: {
           startSeconds: { type: Type.NUMBER, description: "구간 시작 시각(초)" },
           endSeconds: { type: Type.NUMBER, description: "구간 종료 시각(초)" },
-          text: { type: Type.STRING, description: "해당 구간의 받아쓰기 텍스트" },
+          text: { type: Type.STRING, description: "해당 구간(1~2문장)의 받아쓰기 텍스트" },
         },
         required: ["startSeconds", "endSeconds", "text"],
       },
     },
     summary: {
       type: Type.STRING,
-      description: "녹음 음성만을 기반으로 한 3~5줄 내외의 빠른 강의 주제 및 핵심 개요 (마크다운)",
+      description:
+        "녹음 음성만을 기반으로 한 핵심 요약 3~5개를 '• '로 시작하는 글머리 기호 리스트로 작성 (마크다운, 줄글 문단 형태 금지)",
     },
     lectureNote: {
       type: Type.STRING,
-      description: "강의 음성과 참고자료를 통합한 시험 대비용 상세 강의노트 (마크다운, 표/콜아웃 활용)",
+      description:
+        "강의 음성과 참고자료를 통합한 시험 대비용 상세 강의노트 (마크다운). 번호가 매겨진 대주제(## 1. ...) 구조, 본문은 일반 텍스트/불릿 기본, 강조가 필요한 항목에만 선택적으로 '> 🔥'/'> 🗣️' 콜아웃 사용",
     },
     checklist: {
       type: Type.ARRAY,
@@ -98,6 +102,23 @@ function normalizeMimeType(mimeType: string): string {
 // so downstream markdown rendering sees real newlines either way.
 function fixEscapedNewlines(text: string): string {
   return text.replace(/\\n/g, "\n");
+}
+
+function describeGeminiError(error: unknown): string {
+  if (error instanceof ApiError) {
+    if (error.status === 404) {
+      return `Gemini 모델(${MODEL})을 찾을 수 없습니다. 모델명이 올바른지, 이 API 키에서 사용 가능한 모델인지 확인해주세요. (${error.message})`;
+    }
+    if (error.status === 401 || error.status === 403) {
+      return `Gemini API 인증에 실패했습니다. GEMINI_API_KEY가 유효한지 확인해주세요. (${error.message})`;
+    }
+    if (error.status === 429) {
+      return `Gemini API 요청 한도를 초과했습니다. 잠시 후 다시 시도해주세요. (${error.message})`;
+    }
+    return `Gemini API 오류 (HTTP ${error.status}): ${error.message}`;
+  }
+  const message = error instanceof Error ? error.message : "AI 분석에 실패했습니다.";
+  return `Gemini 분석 실패: ${message}`;
 }
 
 // Uploaded files start in PROCESSING and must reach ACTIVE before they can
@@ -206,29 +227,39 @@ export async function POST(request: Request) {
   // data tops out around ~20MB per request, far too small for a full lecture.
   let uploadedAudio: GenAiFile;
   try {
+    console.log("[transcribe-and-summarize] uploading audio to Gemini Files API", {
+      name: audioFile.name,
+      sizeBytes: audioFile.size,
+      mimeType: audioFile.type,
+    });
     uploadedAudio = await ai.files.upload({
       file: audioFile,
       config: { mimeType: normalizeMimeType(audioFile.type || "audio/webm"), displayName: audioFile.name },
     });
     uploadedAudio = await waitForFileActive(ai, uploadedAudio);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "오디오 업로드에 실패했습니다.";
-    return NextResponse.json({ error: `오디오 처리 실패: ${message}` }, { status: 502 });
+    console.error("[transcribe-and-summarize] audio upload failed", { error });
+    return NextResponse.json({ error: `오디오 처리 실패: ${describeGeminiError(error)}` }, { status: 502 });
   }
 
   let uploadedReference: GenAiFile | null = null;
   if (hasReference) {
     try {
       const refFile = referenceFile as File;
+      console.log("[transcribe-and-summarize] uploading reference doc to Gemini Files API", {
+        name: refFile.name,
+        sizeBytes: refFile.size,
+        mimeType: refFile.type,
+      });
       uploadedReference = await ai.files.upload({
         file: refFile,
         config: { mimeType: normalizeMimeType(refFile.type || "application/pdf"), displayName: refFile.name },
       });
       uploadedReference = await waitForFileActive(ai, uploadedReference);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "참고자료 업로드에 실패했습니다.";
+      console.error("[transcribe-and-summarize] reference upload failed", { error });
       await deleteUploadedFile(ai, uploadedAudio);
-      return NextResponse.json({ error: `참고자료 처리 실패: ${message}` }, { status: 502 });
+      return NextResponse.json({ error: `참고자료 처리 실패: ${describeGeminiError(error)}` }, { status: 502 });
     }
   }
 
@@ -248,24 +279,31 @@ export async function POST(request: Request) {
   const promptLines = [
     "첨부된 강의 녹음 오디오를 듣고 아래 항목을 생성해주세요.",
     "1. hasSpeech: 오디오에 실제 강의 음성이 있는지 여부.",
-    "2. transcript: 발화 구간별로 나눈 정확한 받아쓰기. 각 구간은 시작/종료 시각(초 단위 숫자)과 텍스트를 포함합니다.",
-    "3. summary: 녹음 음성만을 기반으로 한 3~5줄 내외의 빠른 강의 주제 및 핵심 개요 (마크다운). 참고자료 내용은 여기에 포함하지 마세요.",
+    "2. transcript: 발화 내용을 15~30초 분량의 자연스러운 1~2개 완성 문장 단위로 묶어서 나눈 정확한 받아쓰기. " +
+      "단어나 짧은 어절 단위로 지나치게 잘게 쪼개지 마세요. 각 구간은 시작/종료 시각(초 단위 숫자)과 텍스트를 포함합니다.",
+    "3. summary: 녹음 음성만을 기반으로 핵심 내용 3~5개를 골라 각 줄을 '• '로 시작하는 글머리 기호 리스트로 작성하세요 " +
+      "(줄글 문단 형태로 쓰지 말 것). 참고자료 내용은 여기에 포함하지 마세요.",
     "4. lectureNote: 시험 대비용 상세 강의노트 (마크다운). 아래 [상세 강의노트 작성 지침]을 반드시 따르세요.",
     "5. checklist: 학습자가 실천해야 할 과제 또는 복습해야 할 핵심 항목 목록 (문장 배열).",
     "",
     "[상세 강의노트 작성 지침] lectureNote는 summary보다 훨씬 상세하고 포괄적으로 작성하세요.",
     "- [포괄성] 강의 중 언급된 사소한 팁, 교수의 코멘트, 슬라이드 속 세부 텍스트/표까지 빠짐없이 모두 수록하세요.",
-    "- [중요도 표시] 각 항목 앞에 아래 중 알맞은 표시를 붙이세요.",
-    "  🔥 [시험/핵심 강조]: 교수가 강조한 출제 포인트, 핵심 개념",
-    "  💡 [강의자료 보충]: 교수가 말로 설명하지 않았지만 슬라이드/자료에 있는 필수 개념이나 도표 설명",
-    "  🗣️ [교수님 코멘트/사례]: 맥락 이해를 돕는 예시나 사소한 멘트",
-    "- [서식] Markdown H2(##)/H3(###) 제목, 글머리 기호, 핵심 용어 볼드체(**), 필요한 경우 비교표(Markdown 표)를 적극 활용해 가독성을 높이세요.",
+    "- [구조] 전체 내용을 대주제 단위로 나누어 \"## 1. 대주제명\", \"## 2. 대주제명\"처럼 번호를 매긴 H2 제목으로 구성하고, " +
+      "필요하면 그 안에서 H3(###) 소제목으로 세분화하세요. 각 대주제 아래 일반적인 설명·배경지식·세부 내용은 " +
+      "기본적으로 평범한 문단이나 글머리 기호(- 또는 •) 리스트로 작성하세요.",
+    "- [선택적 강조] 모든 문장을 콜아웃 박스로 감싸지 마세요(도배 금지). 아래 두 경우에만 해당 문장 앞에 " +
+      '"> " 를 붙인 인용(blockquote) 콜아웃으로 선택적으로 강조하세요.',
+    "  > 🔥 [시험/핵심 강조]: 교수가 특별히 강조한 출제 포인트, 반드시 암기해야 할 핵심 개념",
+    "  > 🗣️ [교수님 코멘트/사례]: 맥락 이해를 돕는 교수님의 예시나 인상적인 멘트",
+    "  그 외 일반적인 설명은 콜아웃 없이 작성하세요.",
+    "- [서식] 핵심 용어는 볼드체(**)로 강조하고, 필요한 경우 비교표(Markdown 표)를 활용해 가독성을 높이세요.",
   ];
 
   if (hasReference) {
     promptLines.push(
       "- [자료 연계] 강의자료에 도식/표/다이어그램이 포함된 구간을 다룰 때는 본문에 \"[슬라이드 N페이지: OO 도식 참조]\" 형태로 표기하세요. " +
-        "정확한 페이지 번호를 알 수 없으면 \"[강의자료: OO 도식 참조]\"로 표기하세요.",
+        "정확한 페이지 번호를 알 수 없으면 \"[강의자료: OO 도식 참조]\"로 표기하세요. " +
+        '교수가 말로 설명하지 않았지만 슬라이드/자료에만 있는 필수 개념은 "> 💡 [강의자료 보충] ..." 콜아웃으로 선택적으로 덧붙일 수 있습니다.',
     );
   } else {
     promptLines.push("- 강의자료가 첨부되지 않았으므로 음성 강의 내용만으로 최대한 상세하게 작성하세요.");
@@ -304,6 +342,17 @@ export async function POST(request: Request) {
     );
   }
 
+  console.log("[transcribe-and-summarize] calling Gemini", {
+    model: MODEL,
+    audioFile: { uri: uploadedAudio.uri, mimeType: uploadedAudio.mimeType, name: uploadedAudio.name },
+    referenceFile: uploadedReference
+      ? { uri: uploadedReference.uri, mimeType: uploadedReference.mimeType, name: uploadedReference.name }
+      : null,
+    promptChars: userPrompt.length,
+    keywordCount: keywords.length,
+    bookmarkCount: bookmarks.length,
+  });
+
   let responseText: string | undefined;
   try {
     const response = await ai.models.generateContent({
@@ -325,8 +374,12 @@ export async function POST(request: Request) {
 
     responseText = response.text;
   } catch (error) {
-    const message = error instanceof Error ? error.message : "AI 분석에 실패했습니다.";
-    return NextResponse.json({ error: `Gemini 분석 실패: ${message}` }, { status: 502 });
+    console.error("[transcribe-and-summarize] Gemini call failed", {
+      model: MODEL,
+      status: error instanceof ApiError ? error.status : undefined,
+      error,
+    });
+    return NextResponse.json({ error: describeGeminiError(error) }, { status: 502 });
   } finally {
     // Best-effort cleanup — Files API entries auto-expire after 48h anyway,
     // so a failed delete here isn't worth surfacing to the user.

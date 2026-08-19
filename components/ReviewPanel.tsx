@@ -1,33 +1,22 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useState } from "react";
 import { DeepDiveModal } from "@/components/DeepDiveModal";
+import { NotionExportModal } from "@/components/NotionExportModal";
+import { TranscriptPanel } from "@/components/TranscriptPanel";
 import { copyToClipboard, downloadTextFile } from "@/lib/export";
-import { formatDuration } from "@/lib/format";
 import { renderMarkdown } from "@/lib/markdown";
-import type { AiResult, DraftBlock } from "@/lib/types";
+import type { AiResult, DraftBlock, TranscriptSegment } from "@/lib/types";
 
 type ReviewPanelProps = {
+  title: string;
   aiResult: AiResult;
   onSeek: (ms: number) => void;
   onToggleChecklistItem: (id: string) => void;
   onUpdateLectureNote: (nextLectureNote: string) => void;
+  onUpdateTranscript: (nextTranscript: TranscriptSegment[]) => void;
+  onSegmentCommitted?: (oldText: string, newText: string) => void;
 };
-
-function highlightText(text: string, query: string) {
-  if (!query.trim()) return text;
-  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const parts = text.split(new RegExp(`(${escaped})`, "gi"));
-  return parts.map((part, index) =>
-    part.toLowerCase() === query.toLowerCase() ? (
-      <mark key={index} className="rounded bg-yellow-200 px-0.5">
-        {part}
-      </mark>
-    ) : (
-      <span key={index}>{part}</span>
-    ),
-  );
-}
 
 function buildSummaryExportContent(aiResult: AiResult) {
   return ["# 강의 요약", "", aiResult.summary || "요약 내용이 없습니다."].join("\n");
@@ -63,34 +52,24 @@ function mergeConfirmedBlocks(lectureNote: string, blocks: DraftBlock[]): string
   return result;
 }
 
-export function ReviewPanel({ aiResult, onSeek, onToggleChecklistItem, onUpdateLectureNote }: ReviewPanelProps) {
-  const [query, setQuery] = useState("");
+export function ReviewPanel({
+  title,
+  aiResult,
+  onSeek,
+  onToggleChecklistItem,
+  onUpdateLectureNote,
+  onUpdateTranscript,
+  onSegmentCommitted,
+}: ReviewPanelProps) {
   const [summaryCopyLabel, setSummaryCopyLabel] = useState("클립보드 복사");
   const [noteCopyLabel, setNoteCopyLabel] = useState("클립보드 복사");
-  const segmentRefs = useRef(new Map<string, HTMLButtonElement>());
 
   const [expandQuestion, setExpandQuestion] = useState("");
   const [isExpanding, setIsExpanding] = useState(false);
   const [expandError, setExpandError] = useState<string | null>(null);
   const [draftBlocks, setDraftBlocks] = useState<DraftBlock[]>([]);
   const [showModal, setShowModal] = useState(false);
-
-  const firstMatchId = useMemo(() => {
-    if (!query.trim()) return null;
-    const lowered = query.toLowerCase();
-    const match = aiResult.transcript.find((segment) => segment.text.toLowerCase().includes(lowered));
-    return match?.id ?? null;
-  }, [aiResult, query]);
-
-  function handleSearchChange(value: string) {
-    setQuery(value);
-    if (!value.trim()) return;
-    const lowered = value.toLowerCase();
-    const match = aiResult.transcript.find((segment) => segment.text.toLowerCase().includes(lowered));
-    if (match) {
-      segmentRefs.current.get(match.id)?.scrollIntoView({ behavior: "smooth", block: "center" });
-    }
-  }
+  const [showNotionModal, setShowNotionModal] = useState(false);
 
   async function handleCopySummary() {
     const ok = await copyToClipboard(buildSummaryExportContent(aiResult));
@@ -243,6 +222,13 @@ export function ReviewPanel({ aiResult, onSeek, onToggleChecklistItem, onUpdateL
             >
               .md 다운로드
             </button>
+            <button
+              type="button"
+              onClick={() => setShowNotionModal(true)}
+              className="rounded-full border border-zinc-200 bg-zinc-900 px-3 py-1 text-xs font-medium text-white transition hover:bg-zinc-700"
+            >
+              🗂️ 노션으로 내보내기
+            </button>
           </div>
         </div>
         <div className="max-h-[32rem] overflow-y-auto rounded-xl bg-zinc-50 p-3">
@@ -292,40 +278,12 @@ export function ReviewPanel({ aiResult, onSeek, onToggleChecklistItem, onUpdateL
         </div>
       </section>
 
-      <section className="flex min-h-0 flex-col rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
-        <h2 className="mb-2 text-sm font-semibold text-zinc-900">변환된 스크립트</h2>
-        <input
-          type="search"
-          value={query}
-          onChange={(event) => handleSearchChange(event.target.value)}
-          placeholder="스크립트에서 검색..."
-          className="mb-2 w-full rounded-lg border border-zinc-200 px-3 py-1.5 text-sm outline-none focus:border-indigo-300"
-        />
-        {query.trim() && !firstMatchId && (
-          <p className="mb-2 text-xs text-zinc-400">일치하는 내용이 없습니다.</p>
-        )}
-        <div className="max-h-72 overflow-y-auto rounded-xl border border-zinc-100 p-2">
-          {aiResult.transcript.map((segment) => (
-            <button
-              key={segment.id}
-              ref={(el) => {
-                if (el) segmentRefs.current.set(segment.id, el);
-                else segmentRefs.current.delete(segment.id);
-              }}
-              type="button"
-              onClick={() => onSeek(segment.startMs)}
-              className={`mb-1 flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition hover:bg-indigo-50 ${
-                segment.id === firstMatchId ? "bg-yellow-50" : ""
-              }`}
-            >
-              <span className="mt-0.5 shrink-0 font-mono text-xs text-zinc-400">
-                {formatDuration(segment.startMs)}
-              </span>
-              <span className="text-zinc-700">{highlightText(segment.text, query)}</span>
-            </button>
-          ))}
-        </div>
-      </section>
+      <TranscriptPanel
+        transcript={aiResult.transcript}
+        onSeek={onSeek}
+        onTranscriptChange={onUpdateTranscript}
+        onSegmentCommitted={onSegmentCommitted}
+      />
 
       <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
         <h2 className="mb-2 text-sm font-semibold text-zinc-900">체크리스트</h2>
@@ -362,6 +320,17 @@ export function ReviewPanel({ aiResult, onSeek, onToggleChecklistItem, onUpdateL
           onRefineBlock={handleRefineBlock}
           onSave={handleSaveDraftBlocks}
           onClose={() => setShowModal(false)}
+        />
+      )}
+
+      {showNotionModal && (
+        <NotionExportModal
+          title={title}
+          summary={aiResult.summary}
+          lectureNote={aiResult.lectureNote}
+          checklist={aiResult.checklist}
+          transcript={aiResult.transcript}
+          onClose={() => setShowNotionModal(false)}
         />
       )}
     </div>

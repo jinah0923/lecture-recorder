@@ -7,8 +7,14 @@ const CALLOUT_STYLES: Array<{ emoji: string; className: string }> = [
   { emoji: "💜", className: "border-violet-200 bg-violet-50 text-violet-800" },
 ];
 
+// The AI is prompted to write selective callouts as a blockquote line
+// ("> 🔥 ..."), but may also emit a bare emoji-prefixed line — accept both.
+function stripBlockquotePrefix(text: string): string {
+  return text.replace(/^>\s*/, "");
+}
+
 function detectCallout(text: string) {
-  const trimmed = text.trim();
+  const trimmed = stripBlockquotePrefix(text.trim());
   return CALLOUT_STYLES.find((callout) => trimmed.startsWith(callout.emoji));
 }
 
@@ -141,7 +147,7 @@ export function renderMarkdown(markdown: string): ReactNode {
       continue;
     }
 
-    const bulletMatch = line.match(/^[-*]\s+(.*)$/);
+    const bulletMatch = line.match(/^[-*•]\s+(.*)$/);
     if (bulletMatch) {
       listBuffer.push(bulletMatch[1]);
       index++;
@@ -166,16 +172,16 @@ export function renderMarkdown(markdown: string): ReactNode {
       // Greedily consume immediately-following plain lines into the same
       // callout box, so a multi-line block (title + sub-points) renders as
       // one cohesive card rather than several separate paragraphs.
-      const groupLines = [line];
+      const groupLines = [stripBlockquotePrefix(line)];
       let cursor = index + 1;
       while (cursor < lines.length) {
         const nextLine = lines[cursor].trim();
         if (!nextLine) break;
-        if (/^[-*]\s+/.test(nextLine)) break;
+        if (/^[-*•]\s+/.test(nextLine)) break;
         if (/^#{1,4}\s+/.test(nextLine)) break;
         if (nextLine.startsWith("|")) break;
         if (detectCallout(nextLine)) break;
-        groupLines.push(nextLine);
+        groupLines.push(stripBlockquotePrefix(nextLine));
         cursor++;
       }
       blocks.push(

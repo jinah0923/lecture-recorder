@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server";
-import { GoogleGenAI, Type } from "@google/genai";
+import { ApiError, GoogleGenAI, Type } from "@google/genai";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
-const MODEL = "gemini-1.5-flash";
+const MODEL = "gemini-3.6-flash";
 const MAX_NOTE_LENGTH = 20_000;
 const MAX_QUESTION_LENGTH = 500;
 
@@ -26,6 +26,23 @@ const RESPONSE_SCHEMA = {
 
 function fixEscapedNewlines(text: string): string {
   return text.replace(/\\n/g, "\n");
+}
+
+function describeGeminiError(error: unknown): string {
+  if (error instanceof ApiError) {
+    if (error.status === 404) {
+      return `Gemini 모델(${MODEL})을 찾을 수 없습니다. 모델명이 올바른지, 이 API 키에서 사용 가능한 모델인지 확인해주세요. (${error.message})`;
+    }
+    if (error.status === 401 || error.status === 403) {
+      return `Gemini API 인증에 실패했습니다. GEMINI_API_KEY가 유효한지 확인해주세요. (${error.message})`;
+    }
+    if (error.status === 429) {
+      return `Gemini API 요청 한도를 초과했습니다. 잠시 후 다시 시도해주세요. (${error.message})`;
+    }
+    return `Gemini API 오류 (HTTP ${error.status}): ${error.message}`;
+  }
+  const message = error instanceof Error ? error.message : "AI 심화 탐구에 실패했습니다.";
+  return `Gemini 요청 실패: ${message}`;
 }
 
 export async function POST(request: Request) {
@@ -90,6 +107,12 @@ export async function POST(request: Request) {
     "5. anchorText: 위 [기존 강의노트] 원문 안에서, 이 심화 내용이 삽입되기 가장 적합한 위치 바로 앞의 문장이나 제목을 원문 그대로 정확히 인용하세요.",
   ].join("\n");
 
+  console.log("[expand-note] calling Gemini", {
+    model: MODEL,
+    lectureNoteChars: lectureNote.length,
+    questionChars: question.length,
+  });
+
   let responseText: string | undefined;
   try {
     const response = await ai.models.generateContent({
@@ -111,8 +134,12 @@ export async function POST(request: Request) {
 
     responseText = response.text;
   } catch (error) {
-    const message = error instanceof Error ? error.message : "AI 심화 탐구에 실패했습니다.";
-    return NextResponse.json({ error: `Gemini 요청 실패: ${message}` }, { status: 502 });
+    console.error("[expand-note] Gemini call failed", {
+      model: MODEL,
+      status: error instanceof ApiError ? error.status : undefined,
+      error,
+    });
+    return NextResponse.json({ error: describeGeminiError(error) }, { status: 502 });
   }
 
   if (!responseText) {

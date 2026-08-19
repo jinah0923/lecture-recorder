@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AudioPlayer } from "@/components/AudioPlayer";
 import { BookmarkPanel } from "@/components/BookmarkPanel";
 import { CategoryBadgeSelect } from "@/components/CategoryBadgeSelect";
@@ -12,6 +12,7 @@ import { ReviewPanel } from "@/components/ReviewPanel";
 import { probeAudioDurationMs } from "@/lib/audio";
 import { loadSessionById, saveSession } from "@/lib/db";
 import { formatDateTime, formatFileSize } from "@/lib/format";
+import { extractChangedTerms, replaceAllOccurrences } from "@/lib/termDiff";
 import type {
   AiResult,
   Bookmark,
@@ -19,9 +20,14 @@ import type {
   LectureSession,
   ReferenceDocument,
   SessionAudio,
+  TranscriptSegment,
 } from "@/lib/types";
 
 const PROGRESS_STAGES = ["오디오 업로드 중...", "음성 인식(STT) 진행 중...", "AI 요약 생성 중..."];
+// Matches TranscriptPanel's own debounce so a script edit lands in IndexedDB
+// ~300ms after the user stops typing, not 300ms + a second, longer debounce
+// stacked on top.
+const AUTOSAVE_DEBOUNCE_MS = 300;
 
 type RecordingDetailViewProps = {
   sessionId: string;
@@ -69,6 +75,15 @@ export function RecordingDetailView({
 
   const audioRef = useRef<HTMLAudioElement>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+
+  const [syncToast, setSyncToast] = useState<string | null>(null);
+  const syncToastTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (syncToastTimerRef.current) window.clearTimeout(syncToastTimerRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -123,7 +138,7 @@ export function RecordingDetailView({
     const timer = window.setTimeout(() => {
       pendingSaveRef.current = null;
       saveSession(session).then(onSessionSaved).catch(() => {});
-    }, 700);
+    }, AUTOSAVE_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
   }, [
     hydrated,
@@ -177,12 +192,17 @@ export function RecordingDetailView({
     });
   }
 
-  function seekTo(ms: number) {
+  // Stable identities (useCallback) for everything handed down to
+  // ReviewPanel/TranscriptPanel — the script editor keeps its own local
+  // edit/focus state, so a prop reference that churns on every unrelated
+  // parent render (e.g. typing in the title) would still be harmless, but
+  // stability here avoids that extra re-render churn.
+  const seekTo = useCallback((ms: number) => {
     const el = audioRef.current;
     if (!el) return;
     el.currentTime = ms / 1000;
     void el.play();
-  }
+  }, []);
 
   async function handleAnalyze() {
     if (!localAudio?.blob || isAnalyzing) return;
@@ -238,7 +258,7 @@ export function RecordingDetailView({
     }
   }
 
-  function toggleChecklistItem(id: string) {
+  const toggleChecklistItem = useCallback((id: string) => {
     setAiResult((current) => {
       if (!current) return current;
       return {
@@ -248,11 +268,62 @@ export function RecordingDetailView({
         ),
       };
     });
-  }
+  }, []);
 
-  function updateLectureNote(nextLectureNote: string) {
+  const updateLectureNote = useCallback((nextLectureNote: string) => {
     setAiResult((current) => (current ? { ...current, lectureNote: nextLectureNote } : current));
-  }
+  }, []);
+
+  const updateTranscript = useCallback((nextTranscript: TranscriptSegment[]) => {
+    setAiResult((current) => (current ? { ...current, transcript: nextTranscript } : current));
+  }, []);
+
+  // Global term sync: when a transcript-segment edit turns out to be a real
+  // word/term correction (not just whitespace/punctuation), propagate the
+  // same find-and-replace to summary/lectureNote/checklist so a name fixed
+  // in the script doesn't stay wrong everywhere else it was mentioned.
+  // Pure in-memory string ops only (lib/termDiff.ts) — no network/AI call,
+  // so this always resolves within the same tick.
+  const handleSegmentCommitted = useCallback(
+    (oldText: string, newText: string) => {
+      const changes = extractChangedTerms(oldText, newText);
+      if (changes.length === 0 || !aiResult) return;
+
+      let summary = aiResult.summary;
+      let lectureNote = aiResult.lectureNote;
+      let checklist = aiResult.checklist;
+      let changedAny = false;
+
+      for (const { oldTerm, newTerm } of changes) {
+        const nextSummary = replaceAllOccurrences(summary, oldTerm, newTerm);
+        const nextLectureNote = replaceAllOccurrences(lectureNote, oldTerm, newTerm);
+        const nextChecklist = checklist.map((item) => ({
+          ...item,
+          text: replaceAllOccurrences(item.text, oldTerm, newTerm),
+        }));
+        if (
+          nextSummary !== summary ||
+          nextLectureNote !== lectureNote ||
+          nextChecklist.some((item, index) => item.text !== checklist[index].text)
+        ) {
+          changedAny = true;
+        }
+        summary = nextSummary;
+        lectureNote = nextLectureNote;
+        checklist = nextChecklist;
+      }
+
+      if (!changedAny) return;
+
+      setAiResult((current) => (current ? { ...current, summary, lectureNote, checklist } : current));
+
+      const changeSummary = changes.map((c) => `'${c.oldTerm}' → '${c.newTerm}'`).join(", ");
+      setSyncToast(`✓ 용어 동기화 완료: ${changeSummary} (강의노트·요약본에 자동 반영됨)`);
+      if (syncToastTimerRef.current) window.clearTimeout(syncToastTimerRef.current);
+      syncToastTimerRef.current = window.setTimeout(() => setSyncToast(null), 2500);
+    },
+    [aiResult],
+  );
 
   if (!hydrated) {
     return (
@@ -405,11 +476,20 @@ export function RecordingDetailView({
 
       {aiResult && (
         <ReviewPanel
+          title={title || "제목 없는 강의"}
           aiResult={aiResult}
           onSeek={seekTo}
           onToggleChecklistItem={toggleChecklistItem}
           onUpdateLectureNote={updateLectureNote}
+          onUpdateTranscript={updateTranscript}
+          onSegmentCommitted={handleSegmentCommitted}
         />
+      )}
+
+      {syncToast && (
+        <div className="fixed right-4 top-4 z-50 max-w-sm rounded-xl bg-zinc-900 px-4 py-3 text-sm text-white shadow-lg">
+          {syncToast}
+        </div>
       )}
     </div>
   );
