@@ -10,7 +10,7 @@ const nextConfig: NextConfig = {
   // upload directly.
   experimental: {
     serverActions: {
-      bodySizeLimit: "50mb",
+      bodySizeLimit: "150mb",
     },
   },
 };

@@ -99,12 +99,12 @@ export function NotionExportModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4 py-8"
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 sm:items-center sm:px-4 sm:py-8"
       onClick={onClose}
       role="presentation"
     >
       <div
-        className="flex max-h-[85vh] w-full max-w-md flex-col overflow-hidden rounded-2xl bg-white shadow-2xl dark:bg-zinc-900"
+        className="flex max-h-[90vh] w-full flex-col overflow-hidden rounded-t-2xl bg-white shadow-2xl dark:bg-zinc-900 sm:max-h-[85vh] sm:max-w-md sm:rounded-2xl"
         onClick={(event) => event.stopPropagation()}
         role="dialog"
         aria-modal="true"
@@ -198,7 +198,7 @@ export function NotionExportModal({
         </div>
 
         {status !== "success" && (
-          <div className="flex items-center justify-end gap-2 border-t border-zinc-100 px-5 py-3 dark:border-zinc-800">
+          <div className="safe-pb flex items-center justify-end gap-2 border-t border-zinc-100 px-5 py-3 dark:border-zinc-800">
             <button
               type="button"
               onClick={onClose}

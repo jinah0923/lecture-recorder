@@ -23,6 +23,7 @@ export function RecorderControls({
   const chunksRef = useRef<Blob[]>([]);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
 
   useEffect(() => {
     if (!isRecording) return;
@@ -36,10 +37,41 @@ export function RecorderControls({
     return () => window.clearInterval(id);
   }, [isRecording, onElapsedChange]);
 
+  // The screen dimming/locking mid-lecture would pause getUserMedia on some
+  // mobile browsers and cut the recording short, so hold a wake lock for the
+  // whole recording. Per spec the OS releases it whenever the tab goes
+  // hidden (app-switch, screen lock) — re-acquire on return if we're still
+  // recording, so a brief switch away doesn't leave it unheld indefinitely.
+  async function requestWakeLock() {
+    if (!("wakeLock" in navigator)) return;
+    try {
+      wakeLockRef.current = await navigator.wakeLock.request("screen");
+    } catch {
+      // Not fatal — recording continues without the screen-stays-on guarantee
+      // (e.g. permission denied, unsupported in this context).
+    }
+  }
+
+  function releaseWakeLock() {
+    const lock = wakeLockRef.current;
+    wakeLockRef.current = null;
+    lock?.release().catch(() => {});
+  }
+
+  useEffect(() => {
+    if (!isRecording) return;
+    function handleVisibilityChange() {
+      if (document.visibilityState === "visible") void requestWakeLock();
+    }
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, [isRecording]);
+
   useEffect(() => {
     return () => {
       recorderRef.current?.stop();
       streamRef.current?.getTracks().forEach((track) => track.stop());
+      releaseWakeLock();
     };
   }, []);
 
@@ -60,6 +92,7 @@ export function RecorderControls({
       if (event.data.size > 0) chunksRef.current.push(event.data);
     };
     recorder.start();
+    void requestWakeLock();
 
     startedAtRef.current = Date.now();
     onElapsedChange(0);
@@ -67,6 +100,8 @@ export function RecorderControls({
   }
 
   function stopRecording() {
+    releaseWakeLock();
+
     const recorder = recorderRef.current;
     if (!recorder) {
       onRecordingChange(false);

@@ -20,7 +20,7 @@ export function ThemeToggle() {
     return (
       <div
         aria-hidden="true"
-        className="fixed right-4 top-4 z-50 h-9 w-9 rounded-full border border-slate-200 bg-white dark:border-zinc-800 dark:bg-zinc-900"
+        className="fixed right-4 top-[max(1rem,env(safe-area-inset-top))] z-50 h-9 w-9 rounded-full border border-slate-200 bg-white dark:border-zinc-800 dark:bg-zinc-900"
       />
     );
   }
@@ -33,7 +33,7 @@ export function ThemeToggle() {
       onClick={() => setTheme(isDark ? "light" : "dark")}
       aria-label={isDark ? "라이트 모드로 전환" : "다크 모드로 전환"}
       title={isDark ? "라이트 모드로 전환" : "다크 모드로 전환"}
-      className="fixed right-4 top-4 z-50 flex h-9 w-9 items-center justify-center rounded-full border border-slate-200 bg-white text-base shadow-sm transition-colors hover:bg-slate-100 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:bg-zinc-800"
+      className="fixed right-4 top-[max(1rem,env(safe-area-inset-top))] z-50 flex h-9 w-9 items-center justify-center rounded-full border border-slate-200 bg-white text-base shadow-sm transition-colors hover:bg-slate-100 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:bg-zinc-800"
     >
       {isDark ? "☀️" : "🌙"}
     </button>

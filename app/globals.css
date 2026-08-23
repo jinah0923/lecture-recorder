@@ -21,6 +21,21 @@
 html,
 body {
   min-height: 100%;
+  /* Removes the ~300ms tap-delay mobile browsers use to disambiguate a tap
+     from the start of a double-tap-to-zoom gesture. */
+  touch-action: manipulation;
+}
+
+/* iPhone notch/Dynamic Island and home-indicator clearance for fixed UI
+   that sits flush against an edge (modal footers, the recorder's primary
+   action row). Only non-zero once `viewport-fit: cover` is set (see
+   app/layout.tsx's viewport export) — a no-op safe default otherwise. */
+.safe-pt {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+.safe-pb {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
 @keyframes pulse-dot {

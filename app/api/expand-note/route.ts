@@ -37,7 +37,7 @@ function describeGeminiError(error: unknown): string {
       return `Gemini API 인증에 실패했습니다. GEMINI_API_KEY가 유효한지 확인해주세요. (${error.message})`;
     }
     if (error.status === 429) {
-      return `Gemini API 요청 한도를 초과했습니다. 잠시 후 다시 시도해주세요. (${error.message})`;
+      return "Google Gemini API 크레딧이 소진되었습니다. AI Studio에서 크레딧을 충전하거나 새 API 키를 등록해주세요.";
     }
     return `Gemini API 오류 (HTTP ${error.status}): ${error.message}`;
   }
