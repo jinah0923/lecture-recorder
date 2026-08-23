@@ -4,10 +4,9 @@ import type { File as GenAiFile } from "@google/genai";
 
 export const runtime = "nodejs";
 // Long lectures (2-3h) mean upload + processing can run well past a few
-// minutes; keep this generous. (Serverless hosts with a hard function-time
-// ceiling, e.g. Vercel Hobby's 300s, will still cap this regardless of the
-// value here — bump the hosting plan if that applies.)
-export const maxDuration = 800;
+// minutes. Capped at 300s to match Vercel Hobby's plan ceiling — a hosting
+// upgrade would allow raising this again for very long recordings.
+export const maxDuration = 300;
 // This route always reads a fresh multipart upload (request.formData()) and
 // calls out to Gemini — never cacheable, so opt out of static optimization
 // explicitly rather than relying on Next's implicit dynamic detection.
