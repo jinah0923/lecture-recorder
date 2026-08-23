@@ -28,6 +28,13 @@ export const metadata: Metadata = {
 // color are their own export, not nested metadata fields.
 export const viewport: Viewport = {
   themeColor: "#4f46e5",
+  // Tells the mobile browser (Samsung Internet's "다크 모드로 전환", Chrome's
+  // "Force dark") that this page already handles both schemes itself via the
+  // .dark class + next-themes — without this, those "helpful" OS/browser
+  // dark-mode-everything features can repaint an explicitly light-mode page
+  // as dark underneath our own light styles, which is exactly the reported
+  // "background stuck dark" bug.
+  colorScheme: "light dark",
   width: "device-width",
   initialScale: 1,
   maximumScale: 1,
@@ -46,7 +53,7 @@ export default function RootLayout({
     // the wrong theme) — React would otherwise warn about that class not
     // matching the server-rendered markup.
     <html lang="en" suppressHydrationWarning>
-      <body className="min-h-screen bg-slate-50 text-slate-900 antialiased transition-colors dark:bg-zinc-950 dark:text-zinc-100">
+      <body className="min-h-screen bg-white text-zinc-900 antialiased transition-colors dark:bg-zinc-950 dark:text-zinc-100">
         <ThemeProvider attribute="class" defaultTheme="light" enableSystem={false}>
           <ThemeToggle />
           {children}

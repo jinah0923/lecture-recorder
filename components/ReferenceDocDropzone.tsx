@@ -52,7 +52,7 @@ export function ReferenceDocDropzone({ document, onDocumentChange, onClear }: Re
         className={`flex w-full cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed px-4 py-6 text-center transition ${
           isDragging
             ? "border-indigo-400 bg-indigo-50 dark:border-indigo-600 dark:bg-indigo-950/30"
-            : "border-zinc-200 bg-zinc-50 hover:border-zinc-300 hover:bg-zinc-100/70 dark:border-zinc-800 dark:bg-zinc-800/40 dark:hover:border-zinc-700 dark:hover:bg-zinc-800/70"
+            : "border-slate-200 bg-zinc-50 hover:border-zinc-300 hover:bg-zinc-100/70 dark:border-zinc-800 dark:bg-zinc-800/40 dark:hover:border-zinc-700 dark:hover:bg-zinc-800/70"
         }`}
       >
         {document ? (

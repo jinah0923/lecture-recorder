@@ -52,7 +52,7 @@ export function Pagination({ page, totalPages, onPageChange, onTop }: Pagination
               className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-xs font-medium transition ${
                 token === page
                   ? "border border-indigo-400 bg-indigo-50 text-indigo-700 dark:border-indigo-500 dark:bg-indigo-950/50 dark:text-indigo-300"
-                  : "border border-transparent text-zinc-500 hover:border-zinc-200 hover:bg-zinc-100 hover:text-zinc-800 dark:text-zinc-400 dark:hover:border-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                  : "border border-transparent text-zinc-500 hover:border-slate-200 hover:bg-zinc-100 hover:text-zinc-800 dark:text-zinc-400 dark:hover:border-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
               }`}
             >
               {token}
@@ -63,7 +63,7 @@ export function Pagination({ page, totalPages, onPageChange, onTop }: Pagination
       <button
         type="button"
         onClick={onTop}
-        className="flex shrink-0 items-center gap-1 rounded-full border border-zinc-200 px-3 py-1 text-xs font-medium text-zinc-600 transition hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-700 dark:border-zinc-700 dark:text-zinc-400 dark:hover:border-indigo-800 dark:hover:bg-indigo-950/40 dark:hover:text-indigo-300"
+        className="flex shrink-0 items-center gap-1 rounded-full border border-slate-200 px-3 py-1 text-xs font-medium text-zinc-600 transition hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-700 dark:border-zinc-700 dark:text-zinc-400 dark:hover:border-indigo-800 dark:hover:bg-indigo-950/40 dark:hover:text-indigo-300"
       >
         ▲ TOP
       </button>

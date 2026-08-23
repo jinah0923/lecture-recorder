@@ -29,7 +29,7 @@ export function AlbumView({ categories, onSelectCategory, onAddCategory }: Album
       </div>
 
       {categories.length === 0 ? (
-        <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-zinc-200 bg-white px-4 py-16 text-center dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-16 text-center dark:border-zinc-800 dark:bg-zinc-900">
           <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">아직 카테고리가 없어요</p>
           <p className="mt-1 text-xs text-zinc-400 dark:text-zinc-500">
             &apos;+ 카테고리 추가&apos; 버튼으로 첫 카테고리를 만들어보세요
@@ -42,7 +42,7 @@ export function AlbumView({ categories, onSelectCategory, onAddCategory }: Album
               key={category.name}
               type="button"
               onClick={() => onSelectCategory(category.name)}
-              className="flex flex-col items-start gap-3 rounded-2xl border border-zinc-200 bg-white p-5 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-indigo-200 hover:shadow-md dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-indigo-900"
+              className="flex flex-col items-start gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-5 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-indigo-200 hover:shadow-md dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-indigo-900"
             >
               <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400">
                 <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8">

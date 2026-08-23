@@ -31,7 +31,7 @@ export function CategoryListView({
       </div>
 
       {sessions.length === 0 ? (
-        <div className="flex flex-1 flex-col items-center justify-center rounded-2xl border border-dashed border-zinc-200 bg-white px-4 py-16 text-center dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="flex flex-1 flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-16 text-center dark:border-zinc-800 dark:bg-zinc-900">
           <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">아직 녹음이 없어요</p>
           <p className="mt-1 text-xs text-zinc-400 dark:text-zinc-500">이 카테고리에 첫 녹음을 추가해보세요</p>
         </div>
@@ -40,7 +40,7 @@ export function CategoryListView({
           {sessions.map((session) => (
             <li
               key={session.id}
-              className="flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 shadow-sm transition hover:border-indigo-200 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-indigo-900"
+              className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 shadow-sm transition hover:border-indigo-200 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-indigo-900"
             >
               <button
                 type="button"

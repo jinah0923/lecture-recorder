@@ -129,7 +129,7 @@ export function RecorderControls({
   }
 
   return (
-    <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-800/40">
+    <div className="rounded-2xl border border-slate-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-800/40">
       <div className="mb-3 flex items-center justify-between">
         <p className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Live recording</p>
         <span className="font-mono text-lg tabular-nums text-zinc-900 dark:text-zinc-100">
@@ -165,7 +165,7 @@ export function RecorderControls({
           type="button"
           onClick={stopRecording}
           disabled={!isRecording}
-          className="inline-flex h-11 flex-1 items-center justify-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 text-sm font-medium text-zinc-800 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+          className="inline-flex h-11 flex-1 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 text-sm font-medium text-zinc-800 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
         >
           <span className="h-2.5 w-2.5 rounded-sm bg-zinc-800 dark:bg-zinc-200" />
           Stop

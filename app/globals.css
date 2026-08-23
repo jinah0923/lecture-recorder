@@ -18,6 +18,20 @@
   --color-record: #dc2626;
 }
 
+/* Explicit per-mode color-scheme (mirrors the viewport `colorScheme:
+   "light dark"` in app/layout.tsx). This is what actually stops mobile
+   browsers' own "force dark" repaint (Samsung Internet, Chrome for Android)
+   from overriding an explicitly light-mode page — without it, those
+   browsers can treat the page as scheme-unaware and invert colors on top of
+   our own light styles. */
+:root {
+  color-scheme: light;
+}
+
+.dark {
+  color-scheme: dark;
+}
+
 html,
 body {
   min-height: 100%;

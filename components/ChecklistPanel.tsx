@@ -111,7 +111,7 @@ export function ChecklistPanel({ checklist, onChange }: ChecklistPanelProps) {
       <button
         type="button"
         onClick={handleAdd}
-        className="mt-2 flex w-full items-center justify-center gap-1 rounded-lg border border-dashed border-zinc-200 py-1.5 text-xs font-medium text-zinc-500 transition-colors hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-600 dark:border-zinc-700 dark:text-zinc-400 dark:hover:border-indigo-800 dark:hover:bg-indigo-950/40 dark:hover:text-indigo-300"
+        className="mt-2 flex w-full items-center justify-center gap-1 rounded-lg border border-dashed border-slate-200 py-1.5 text-xs font-medium text-zinc-500 transition-colors hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-600 dark:border-zinc-700 dark:text-zinc-400 dark:hover:border-indigo-800 dark:hover:bg-indigo-950/40 dark:hover:text-indigo-300"
       >
         + 새 체크리스트 추가
       </button>

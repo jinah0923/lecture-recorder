@@ -230,7 +230,7 @@ export function TranscriptPanel({
   }
 
   return (
-    <section ref={cardRef} className="flex min-h-0 flex-col rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+    <section ref={cardRef} className="flex min-h-0 flex-col rounded-2xl border border-slate-200 bg-slate-50 p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
       <div className="mb-2 flex items-center justify-between gap-2">
         <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">변환된 스크립트</h2>
         {(isSaving || hasSavedOnce) && (
@@ -244,7 +244,7 @@ export function TranscriptPanel({
         value={query}
         onChange={(event) => setQuery(event.target.value)}
         placeholder="스크립트에서 검색..."
-        className="mb-2 w-full rounded-lg border border-zinc-200 bg-slate-100 px-3 py-1.5 text-sm text-slate-900 outline-none focus:border-indigo-300 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+        className="mb-2 w-full rounded-lg border border-slate-200 bg-slate-100 px-3 py-1.5 text-sm text-slate-900 outline-none focus:border-indigo-300 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
       />
       {query.trim() && !firstMatchId && (
         <p className="mb-2 text-xs text-zinc-400 dark:text-zinc-500">일치하는 내용이 없습니다.</p>

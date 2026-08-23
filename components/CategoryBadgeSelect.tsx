@@ -84,7 +84,7 @@ export function CategoryBadgeSelect({
       </button>
 
       {open && (
-        <div className="absolute left-0 top-full z-20 mt-1 w-52 rounded-xl border border-zinc-200 bg-white p-1.5 shadow-lg dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="absolute left-0 top-full z-20 mt-1 w-52 rounded-xl border border-slate-200 bg-white p-1.5 shadow-lg dark:border-zinc-800 dark:bg-zinc-900">
           <ul className="max-h-48 overflow-y-auto">
             {categories.map((name) => (
               <li key={name}>
@@ -123,7 +123,7 @@ export function CategoryBadgeSelect({
                     setError(null);
                   }}
                   placeholder="새 카테고리 이름"
-                  className="w-full rounded-lg border border-zinc-200 bg-slate-100 px-2 py-1 text-sm text-slate-900 outline-none focus:border-indigo-300 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                  className="w-full rounded-lg border border-slate-200 bg-slate-100 px-2 py-1 text-sm text-slate-900 outline-none focus:border-indigo-300 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                 />
                 {error && <p className="text-[11px] text-red-600 dark:text-red-400">{error}</p>}
                 <div className="flex justify-end gap-1">

@@ -66,7 +66,7 @@ export function AudioDropzone({ audio, disabled, onAudioChange, onClear }: Audio
         className={`flex w-full cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed px-4 py-8 text-center transition ${
           isDragging
             ? "border-indigo-400 bg-indigo-50 dark:border-indigo-600 dark:bg-indigo-950/30"
-            : "border-zinc-200 bg-zinc-50 hover:border-zinc-300 hover:bg-zinc-100/70 dark:border-zinc-800 dark:bg-zinc-800/40 dark:hover:border-zinc-700 dark:hover:bg-zinc-800/70"
+            : "border-slate-200 bg-zinc-50 hover:border-zinc-300 hover:bg-zinc-100/70 dark:border-zinc-800 dark:bg-zinc-800/40 dark:hover:border-zinc-700 dark:hover:bg-zinc-800/70"
         } ${disabled ? "cursor-not-allowed opacity-50" : ""}`}
       >
         <span className="mb-2 flex h-10 w-10 items-center justify-center rounded-full bg-white text-zinc-500 shadow-sm dark:bg-zinc-900 dark:text-zinc-400">

@@ -351,7 +351,7 @@ export function RecordingDetailView({
           value={title}
           onChange={(event) => setTitle(event.target.value)}
           placeholder="녹음 제목"
-          className="w-full rounded-lg border border-transparent bg-transparent px-1 py-0.5 text-xl font-semibold tracking-tight text-zinc-900 outline-none transition hover:border-zinc-200 focus:border-indigo-300 focus:bg-white dark:text-zinc-100 dark:hover:border-zinc-700 dark:focus:bg-zinc-900"
+          className="w-full rounded-lg border border-transparent bg-transparent px-1 py-0.5 text-xl font-semibold tracking-tight text-zinc-900 outline-none transition hover:border-slate-200 focus:border-indigo-300 focus:bg-white dark:text-zinc-100 dark:hover:border-zinc-700 dark:focus:bg-zinc-900"
         />
         <div className="mt-0.5 flex flex-wrap items-center gap-2 px-1">
           <p className="text-xs text-zinc-500 dark:text-zinc-400">{formatDateTime(createdAt)}</p>
@@ -429,7 +429,7 @@ export function RecordingDetailView({
       )}
 
       {!aiResult && (
-        <div className="rounded-2xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
           <button
             type="button"
             onClick={handleAnalyze}
@@ -453,7 +453,7 @@ export function RecordingDetailView({
         </div>
       )}
 
-      <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+      <section className="rounded-2xl border border-slate-200 bg-slate-50 p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
         <BookmarkPanel
           bookmarks={bookmarks}
           elapsedMs={0}

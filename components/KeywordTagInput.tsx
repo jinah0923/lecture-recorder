@@ -78,7 +78,7 @@ export function KeywordTagInput({ keywords, onChange }: KeywordTagInputProps) {
         }}
         onBlur={commitDraft}
         placeholder="예: 광합성, 캘빈회로, 루비스코"
-        className="w-full rounded-lg border border-zinc-200 bg-slate-100 px-3 py-2 text-sm text-slate-900 outline-none focus:border-indigo-300 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+        className="w-full rounded-lg border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-900 outline-none focus:border-indigo-300 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
       />
       <p className="mt-1 text-[11px] text-zinc-400 dark:text-zinc-500">쉼표 또는 Enter로 용어를 추가하세요</p>
     </div>

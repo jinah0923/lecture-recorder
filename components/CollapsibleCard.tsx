@@ -14,7 +14,7 @@ export function CollapsibleCard({ title, subtitle, defaultOpen = false, badge, c
   const [open, setOpen] = useState(defaultOpen);
 
   return (
-    <div className="rounded-2xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+    <div className="rounded-2xl border border-slate-200 bg-slate-50 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
       <button
         type="button"
         onClick={() => setOpen((prev) => !prev)}

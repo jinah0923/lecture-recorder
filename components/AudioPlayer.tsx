@@ -69,7 +69,7 @@ export function AudioPlayer({ audioUrl, audioBlob, fileName, audioRef }: AudioPl
   }
 
   return (
-    <div className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
       {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
       <audio ref={audioRef} src={audioUrl} preload="metadata" className="hidden" />
 
@@ -78,7 +78,7 @@ export function AudioPlayer({ audioUrl, audioBlob, fileName, audioRef }: AudioPl
         <button
           type="button"
           onClick={() => downloadBlob(fileName, audioBlob)}
-          className="inline-flex items-center gap-1.5 rounded-full border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+          className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 px-3 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
         >
           <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2">
             <path d="M12 4v11m0 0-4-4m4 4 4-4M5 19h14" strokeLinecap="round" strokeLinejoin="round" />
@@ -132,7 +132,7 @@ export function AudioPlayer({ audioUrl, audioBlob, fileName, audioRef }: AudioPl
             className={`rounded-full px-2.5 py-1 text-xs font-medium transition ${
               speed === value
                 ? "bg-indigo-600 text-white"
-                : "border border-zinc-200 text-zinc-600 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                : "border border-slate-200 text-zinc-600 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
             }`}
           >
             {value}x

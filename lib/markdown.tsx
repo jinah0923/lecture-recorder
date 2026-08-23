@@ -129,14 +129,14 @@ export function renderMarkdown(markdown: string): ReactNode {
         cursor++;
       }
       blocks.push(
-        <div key={`table-${index}`} className="my-1 overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-800">
+        <div key={`table-${index}`} className="my-1 overflow-x-auto rounded-lg border border-slate-200 dark:border-zinc-800">
           <table className="w-full border-collapse text-left text-sm">
             <thead className="bg-zinc-50 dark:bg-zinc-900">
               <tr>
                 {headerCells.map((cell, cellIndex) => (
                   <th
                     key={cellIndex}
-                    className="border-b border-zinc-200 px-3 py-1.5 font-semibold text-zinc-700 dark:border-zinc-800 dark:text-zinc-300"
+                    className="border-b border-slate-200 px-3 py-1.5 font-semibold text-zinc-700 dark:border-zinc-800 dark:text-zinc-300"
                   >
                     {renderInline(cell)}
                   </th>

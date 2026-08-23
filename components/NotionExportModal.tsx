@@ -104,7 +104,7 @@ export function NotionExportModal({
       role="presentation"
     >
       <div
-        className="flex max-h-[90vh] w-full flex-col overflow-hidden rounded-t-2xl bg-white shadow-2xl dark:bg-zinc-900 sm:max-h-[85vh] sm:max-w-md sm:rounded-2xl"
+        className="flex max-h-[90vh] w-full flex-col overflow-hidden rounded-t-2xl bg-slate-50 shadow-2xl dark:bg-zinc-900 sm:max-h-[85vh] sm:max-w-md sm:rounded-2xl"
         onClick={(event) => event.stopPropagation()}
         role="dialog"
         aria-modal="true"
@@ -157,12 +157,12 @@ export function NotionExportModal({
                     value={notionToken}
                     onChange={(event) => setNotionToken(event.target.value)}
                     placeholder="ntn_..."
-                    className="flex-1 rounded-lg border border-zinc-200 bg-slate-100 px-3 py-2 text-sm text-slate-900 outline-none focus:border-indigo-300 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                    className="flex-1 rounded-lg border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-900 outline-none focus:border-indigo-300 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                   />
                   <button
                     type="button"
                     onClick={() => setShowToken((current) => !current)}
-                    className="shrink-0 rounded-lg border border-zinc-200 px-3 text-xs font-medium text-zinc-600 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                    className="shrink-0 rounded-lg border border-slate-200 px-3 text-xs font-medium text-zinc-600 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
                   >
                     {showToken ? "숨기기" : "보기"}
                   </button>
@@ -178,7 +178,7 @@ export function NotionExportModal({
                   value={targetInput}
                   onChange={(event) => setTargetInput(event.target.value)}
                   placeholder="https://www.notion.so/... 또는 https://app.notion.com/p/...?p=..."
-                  className="w-full rounded-lg border border-zinc-200 bg-slate-100 px-3 py-2 text-sm text-slate-900 outline-none focus:border-indigo-300 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                  className="w-full rounded-lg border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-900 outline-none focus:border-indigo-300 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                 />
                 <p className="mt-1 text-[11px] text-zinc-400 dark:text-zinc-500">
                   일반 페이지 링크와 팝업(Center Peek) 창 URL 모두 그대로 붙여넣으면 됩니다.
@@ -202,7 +202,7 @@ export function NotionExportModal({
             <button
               type="button"
               onClick={onClose}
-              className="rounded-full border border-zinc-200 px-4 py-1.5 text-sm font-medium text-zinc-600 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              className="rounded-full border border-slate-200 px-4 py-1.5 text-sm font-medium text-zinc-600 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
             >
               취소
             </button>
