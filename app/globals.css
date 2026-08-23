@@ -18,17 +18,22 @@
   --color-record: #dc2626;
 }
 
-/* Explicit per-mode color-scheme (mirrors the viewport `colorScheme:
-   "light dark"` in app/layout.tsx). This is what actually stops mobile
-   browsers' own "force dark" repaint (Samsung Internet, Chrome for Android)
-   from overriding an explicitly light-mode page — without it, those
-   browsers can treat the page as scheme-unaware and invert colors on top of
-   our own light styles. */
+/* Explicit per-mode color-scheme. `only light` (not just `light`) is what
+   actually stops mobile browsers' own forced-dark engines (Samsung
+   Internet's "웹페이지 강제 다크 모드", Chrome for Android's "Force dark") from
+   repainting an explicitly light-mode page — plain `light` states a
+   preference the browser can still override with its own inversion
+   heuristics, while `only` tells the engine this document does not support
+   being auto-darkened at all, disabling that algorithm outright. Once the
+   .dark class is on <html> (via next-themes), color-scheme switches to a
+   real `dark` — no `only`, since our own dark: styles are hand-authored and
+   don't need protecting from the browser's dark heuristics the way the
+   light styles do. */
 :root {
-  color-scheme: light;
+  color-scheme: only light;
 }
 
-.dark {
+html.dark {
   color-scheme: dark;
 }
 
