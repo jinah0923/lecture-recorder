@@ -5,10 +5,10 @@ import { ChecklistPanel } from "@/components/ChecklistPanel";
 import { DeepDiveModal } from "@/components/DeepDiveModal";
 import { LectureNote } from "@/components/LectureNote";
 import { NotionExportModal } from "@/components/NotionExportModal";
+import { PdfExportModal } from "@/components/PdfExportModal";
 import { TranscriptPanel } from "@/components/TranscriptPanel";
 import { copyToClipboard, downloadTextFile } from "@/lib/export";
 import { renderMarkdown } from "@/lib/markdown";
-import { exportLectureNoteToPdf } from "@/lib/pdfExport";
 import type { AiResult, ChecklistItem, DraftBlock, TranscriptSegment } from "@/lib/types";
 
 type ReviewPanelProps = {
@@ -69,7 +69,6 @@ export function ReviewPanel({
 }: ReviewPanelProps) {
   const [summaryCopyLabel, setSummaryCopyLabel] = useState("클립보드 복사");
   const [noteCopyLabel, setNoteCopyLabel] = useState("클립보드 복사");
-  const [isExportingNotePdf, setIsExportingNotePdf] = useState(false);
 
   const [expandQuestion, setExpandQuestion] = useState("");
   const [isExpanding, setIsExpanding] = useState(false);
@@ -77,6 +76,7 @@ export function ReviewPanel({
   const [draftBlocks, setDraftBlocks] = useState<DraftBlock[]>([]);
   const [showModal, setShowModal] = useState(false);
   const [showNotionModal, setShowNotionModal] = useState(false);
+  const [showPdfModal, setShowPdfModal] = useState(false);
 
   async function handleCopySummary() {
     const ok = await copyToClipboard(buildSummaryExportContent(aiResult));
@@ -98,18 +98,6 @@ export function ReviewPanel({
   function handleDownloadNote(extension: "txt" | "md") {
     const mime = extension === "md" ? "text/markdown" : "text/plain";
     downloadTextFile(`lecture-note.${extension}`, buildLectureNoteExportContent(aiResult), mime);
-  }
-
-  async function handleDownloadNotePdf() {
-    if (isExportingNotePdf) return;
-    setIsExportingNotePdf(true);
-    try {
-      await exportLectureNoteToPdf(aiResult.lectureNote, title, slideImages);
-    } catch (error) {
-      console.error("PDF 생성 실패:", error);
-    } finally {
-      setIsExportingNotePdf(false);
-    }
   }
 
   async function requestExpansion(question: string, replaceBlockId?: string) {
@@ -243,21 +231,10 @@ export function ReviewPanel({
             </button>
             <button
               type="button"
-              onClick={handleDownloadNotePdf}
-              disabled={isExportingNotePdf}
-              className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 px-3 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              onClick={() => setShowPdfModal(true)}
+              className="rounded-full border border-slate-200 px-3 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
             >
-              {isExportingNotePdf ? (
-                <>
-                  <svg className="h-3 w-3 animate-spin" viewBox="0 0 24 24" fill="none">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                  </svg>
-                  PDF 생성 중...
-                </>
-              ) : (
-                ".pdf 다운로드"
-              )}
+              .pdf 다운로드
             </button>
             <button
               type="button"
@@ -344,6 +321,18 @@ export function ReviewPanel({
           checklist={aiResult.checklist}
           transcript={aiResult.transcript}
           onClose={() => setShowNotionModal(false)}
+        />
+      )}
+
+      {showPdfModal && (
+        <PdfExportModal
+          title={title}
+          summary={aiResult.summary}
+          lectureNote={aiResult.lectureNote}
+          transcript={aiResult.transcript}
+          checklist={aiResult.checklist}
+          slideImages={slideImages}
+          onClose={() => setShowPdfModal(false)}
         />
       )}
     </div>

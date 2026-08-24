@@ -1,5 +1,7 @@
 "use client";
 
+import type { ChecklistItem, TranscriptSegment } from "@/lib/types";
+
 // html2canvas cannot parse modern CSS color functions (e.g. Tailwind v4's
 // oklch()-based palette), and — critically — html2pdf.js's own `.from()`
 // convenience API clones the source element into an overlay it appends to
@@ -223,6 +225,48 @@ function renderMarkdownToHtml(markdown: string, slideImages?: Map<number, string
   return `<div style="display:flex;flex-direction:column;">${blocks.join("")}</div>`;
 }
 
+function formatPdfTimestamp(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function renderTranscriptToHtml(transcript: TranscriptSegment[]): string {
+  if (transcript.length === 0) {
+    return `<p style="${BODY_STYLE}margin:4px 0;color:#9ca3af;">변환된 스크립트가 없습니다.</p>`;
+  }
+  const rows = transcript
+    .map(
+      (segment) =>
+        `<div ${AVOID_BREAK_ATTR} style="${AVOID_BREAK_STYLE}display:flex;gap:10px;margin:4px 0;">` +
+        `<span style="flex-shrink:0;width:40px;font-family:monospace;font-size:11px;color:#9ca3af;">${formatPdfTimestamp(segment.startMs)}</span>` +
+        `<p style="${BODY_STYLE}margin:0;flex:1;">${renderInlineHtml(segment.text)}</p>` +
+        `</div>`,
+    )
+    .join("");
+  return `<div style="display:flex;flex-direction:column;">${rows}</div>`;
+}
+
+function renderChecklistToHtml(checklist: ChecklistItem[]): string {
+  if (checklist.length === 0) {
+    return `<p style="${BODY_STYLE}margin:4px 0;color:#9ca3af;">생성된 체크리스트가 없습니다.</p>`;
+  }
+  const rows = checklist
+    .map((item) => {
+      const boxColor = item.done ? "#10b981" : "#9ca3af";
+      const textStyle = item.done ? "color:#9ca3af;text-decoration:line-through;" : "color:#374151;";
+      return (
+        `<div ${AVOID_BREAK_ATTR} style="${AVOID_BREAK_STYLE}display:flex;gap:8px;margin:4px 0;align-items:flex-start;">` +
+        `<span style="flex-shrink:0;font-size:14px;line-height:1.6;color:${boxColor};">${item.done ? "☑" : "☐"}</span>` +
+        `<p style="font-size:12.5px;line-height:1.6;margin:0;${textStyle}">${renderInlineHtml(item.text)}</p>` +
+        `</div>`
+      );
+    })
+    .join("");
+  return `<div style="display:flex;flex-direction:column;">${rows}</div>`;
+}
+
 function sanitizeFileNamePart(text: string): string {
   return text.replace(/[\\/:*?"<>|]/g, "").trim() || "제목 없는 강의";
 }
@@ -243,12 +287,26 @@ const USABLE_HEIGHT_MM = PAGE_HEIGHT_MM - MARGIN_MM * 2;
 type AvoidRange = { top: number; bottom: number };
 
 // Picks each page's end so it never lands inside a callout box or table
-// (falls back to a plain cut only if a single block is taller than a page).
-function computePageSlices(canvasHeightPx: number, usableHeightPx: number, avoidRanges: AvoidRange[]) {
+// (falls back to a plain cut only if a single block is taller than a page),
+// and additionally forces a break at each `hardBreaks` offset (a selected
+// section's start) so every chosen section always begins on a fresh page —
+// this is what actually implements "page-break-before" against a flattened
+// single canvas (there's no real DOM to apply that CSS property to once
+// html2canvas has rasterized it).
+function computePageSlices(
+  canvasHeightPx: number,
+  usableHeightPx: number,
+  avoidRanges: AvoidRange[],
+  hardBreaks: number[] = [],
+) {
   const slices: Array<{ sy: number; sh: number }> = [];
   let y = 0;
   while (y < canvasHeightPx - 0.5) {
     let end = Math.min(y + usableHeightPx, canvasHeightPx);
+    const nextHardBreak = hardBreaks.find((offset) => offset > y + 0.5 && offset < end);
+    if (nextHardBreak !== undefined) {
+      end = nextHardBreak;
+    }
     for (const range of avoidRanges) {
       if (range.top > y && range.top < end && range.bottom > end) {
         end = range.top;
@@ -260,14 +318,47 @@ function computePageSlices(canvasHeightPx: number, usableHeightPx: number, avoid
   return slices;
 }
 
-// Always exports the full, untouched markdown (never the currently-paginated
-// slice shown on screen) — same data-preservation principle as copy/.txt/.md
-// download and Notion export.
-export async function exportLectureNoteToPdf(
-  markdown: string,
-  recordingTitle: string,
-  slideImages?: Map<number, string>,
-): Promise<void> {
+export type PdfSectionId = "summary" | "lectureNote" | "transcript" | "checklist";
+
+const SECTION_TITLES: Record<PdfSectionId, string> = {
+  summary: "AI 요약본",
+  lectureNote: "상세 강의노트",
+  transcript: "변환된 스크립트",
+  checklist: "체크리스트",
+};
+
+export type PdfExportData = {
+  title: string;
+  summary: string;
+  lectureNote: string;
+  transcript: TranscriptSegment[];
+  checklist: ChecklistItem[];
+  slideImages?: Map<number, string>;
+};
+
+function renderSectionBodyHtml(sectionId: PdfSectionId, data: PdfExportData): string {
+  switch (sectionId) {
+    case "summary":
+      return renderMarkdownToHtml(data.summary?.trim() ? data.summary : "요약 내용이 없습니다.");
+    case "lectureNote":
+      return renderMarkdownToHtml(
+        data.lectureNote?.trim() ? data.lectureNote : "상세 강의노트가 없습니다.",
+        data.slideImages,
+      );
+    case "transcript":
+      return renderTranscriptToHtml(data.transcript);
+    case "checklist":
+      return renderChecklistToHtml(data.checklist);
+  }
+}
+
+// Renders whichever sections the user picked (PdfExportModal), each from its
+// full, untouched source — same data-preservation principle as copy/.txt/.md
+// download and Notion export. Every section after the first is marked with
+// data-section-start so computePageSlices forces it onto a fresh page.
+export async function exportSectionsToPdf(sections: PdfSectionId[], data: PdfExportData): Promise<void> {
+  if (sections.length === 0) return;
+
   const [{ default: html2canvas }, { jsPDF }] = await Promise.all([import("html2canvas"), import("jspdf")]);
 
   const iframe = document.createElement("iframe");
@@ -290,14 +381,27 @@ export async function exportLectureNoteToPdf(
     frameDoc.write('<!DOCTYPE html><html><head><meta charset="utf-8" /></head><body></body></html>');
     frameDoc.close();
 
-    const safeTitle = escapeHtml(recordingTitle || "제목 없는 강의");
-    const bodyMarkdown = markdown?.trim() ? markdown : "상세 강의노트가 없습니다.";
+    const safeTitle = escapeHtml(data.title || "제목 없는 강의");
+
+    const sectionsHtml = sections
+      .map((sectionId, index) => {
+        const isFirst = index === 0;
+        const heading = `<p style="font-size:16px;font-weight:700;color:${PDF_TEXT_COLOR};margin:0 0 10px;">${escapeHtml(SECTION_TITLES[sectionId])}</p>`;
+        const body = renderSectionBodyHtml(sectionId, data);
+        // A visible divider too (not just the forced page break) — still
+        // useful context if a page ever renders both sides of a boundary
+        // (e.g. a future zoomed/print-preview view of the raw HTML).
+        const wrapperStyle = isFirst ? "" : "margin-top:18px;padding-top:14px;border-top:2px solid #e5e7eb;";
+        const marker = isFirst ? "" : ' data-section-start="true"';
+        return `<div${marker} style="${wrapperStyle}">${heading}${body}</div>`;
+      })
+      .join("");
 
     frameDoc.body.style.margin = "0";
     frameDoc.body.style.backgroundColor = PDF_BACKGROUND;
     frameDoc.body.innerHTML = `<div id="pdf-export-root" style="width:${CONTENT_WIDTH_PX}px;box-sizing:border-box;background:${PDF_BACKGROUND};color:${PDF_TEXT_COLOR};font-family:${PDF_FONT_FAMILY};">
-      <p style="font-size:18px;font-weight:700;color:${PDF_TEXT_COLOR};margin:0 0 12px;">${safeTitle}</p>
-      ${renderMarkdownToHtml(bodyMarkdown, slideImages)}
+      <p style="font-size:18px;font-weight:700;color:${PDF_TEXT_COLOR};margin:0 0 14px;">${safeTitle}</p>
+      ${sectionsHtml}
     </div>`;
 
     const printRoot = frameDoc.getElementById("pdf-export-root");
@@ -326,6 +430,10 @@ export async function exportLectureNoteToPdf(
         bottom: (rect.bottom - rootRect.top) * CAPTURE_SCALE,
       };
     });
+    const hardBreaks: number[] = Array.from(printRoot.querySelectorAll("[data-section-start]")).map((el) => {
+      const rect = el.getBoundingClientRect();
+      return (rect.top - rootRect.top) * CAPTURE_SCALE;
+    });
 
     // Captured directly from the still-isolated iframe element — never
     // reparented into the app's document, unlike html2pdf.js's own flow.
@@ -337,7 +445,7 @@ export async function exportLectureNoteToPdf(
 
     const mmPerCanvasPx = USABLE_WIDTH_MM / canvas.width;
     const usableHeightPx = USABLE_HEIGHT_MM / mmPerCanvasPx;
-    const slices = computePageSlices(canvas.height, usableHeightPx, avoidRanges);
+    const slices = computePageSlices(canvas.height, usableHeightPx, avoidRanges, hardBreaks);
 
     const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
     const pageCanvas = document.createElement("canvas");
@@ -362,7 +470,7 @@ export async function exportLectureNoteToPdf(
       );
     });
 
-    pdf.save(buildPdfFileName(recordingTitle, new Date()));
+    pdf.save(buildPdfFileName(data.title, new Date()));
   } finally {
     document.body.removeChild(iframe);
   }
