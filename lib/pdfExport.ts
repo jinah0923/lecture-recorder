@@ -81,7 +81,11 @@ function isTableSeparatorRow(line: string): boolean {
   return cells.length > 0 && cells.every((cell) => /^:?-+:?$/.test(cell));
 }
 
-function renderMarkdownToHtml(markdown: string): string {
+// Matches lib/markdown.tsx's on-screen convention — see that file for why
+// this exact syntax.
+const SLIDE_IMAGE_PATTERN = /^!\[[^\]]*\]\(slide_(\d+)\)$/;
+
+function renderMarkdownToHtml(markdown: string, slideImages?: Map<number, string>): string {
   const lines = markdown.split("\n");
   const blocks: string[] = [];
   let listBuffer: string[] = [];
@@ -170,6 +174,23 @@ function renderMarkdownToHtml(markdown: string): string {
       continue;
     }
 
+    const slideMatch = line.match(SLIDE_IMAGE_PATTERN);
+    if (slideMatch) {
+      const page = Number(slideMatch[1]);
+      const dataUrl = slideImages?.get(page);
+      if (dataUrl) {
+        blocks.push(
+          `<div ${AVOID_BREAK_ATTR} style="${AVOID_BREAK_STYLE}margin:6px 0;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;"><img src="${dataUrl}" alt="슬라이드 ${page}" style="display:block;width:100%;" /><p style="margin:0;padding:6px 10px;font-size:11px;color:#6b7280;border-top:1px solid #e5e7eb;">🖼️ 슬라이드 ${page}</p></div>`,
+        );
+      } else {
+        blocks.push(
+          `<p style="${BODY_STYLE}margin:4px 0;color:#9ca3af;">🖼️ 슬라이드 ${page} 이미지를 불러올 수 없습니다.</p>`,
+        );
+      }
+      index++;
+      continue;
+    }
+
     const callout = detectCallout(line);
     if (callout) {
       // Greedily consume immediately-following plain lines into the same
@@ -242,7 +263,11 @@ function computePageSlices(canvasHeightPx: number, usableHeightPx: number, avoid
 // Always exports the full, untouched markdown (never the currently-paginated
 // slice shown on screen) — same data-preservation principle as copy/.txt/.md
 // download and Notion export.
-export async function exportLectureNoteToPdf(markdown: string, recordingTitle: string): Promise<void> {
+export async function exportLectureNoteToPdf(
+  markdown: string,
+  recordingTitle: string,
+  slideImages?: Map<number, string>,
+): Promise<void> {
   const [{ default: html2canvas }, { jsPDF }] = await Promise.all([import("html2canvas"), import("jspdf")]);
 
   const iframe = document.createElement("iframe");
@@ -272,11 +297,26 @@ export async function exportLectureNoteToPdf(markdown: string, recordingTitle: s
     frameDoc.body.style.backgroundColor = PDF_BACKGROUND;
     frameDoc.body.innerHTML = `<div id="pdf-export-root" style="width:${CONTENT_WIDTH_PX}px;box-sizing:border-box;background:${PDF_BACKGROUND};color:${PDF_TEXT_COLOR};font-family:${PDF_FONT_FAMILY};">
       <p style="font-size:18px;font-weight:700;color:${PDF_TEXT_COLOR};margin:0 0 12px;">${safeTitle}</p>
-      ${renderMarkdownToHtml(bodyMarkdown)}
+      ${renderMarkdownToHtml(bodyMarkdown, slideImages)}
     </div>`;
 
     const printRoot = frameDoc.getElementById("pdf-export-root");
     if (!printRoot) throw new Error("PDF 렌더링용 컨테이너를 찾지 못했습니다.");
+
+    // Slide images are inline data: URLs, so this resolves near-instantly —
+    // but html2canvas still needs actual decoded dimensions before it
+    // captures, and the avoid-break measurements below need real layout.
+    await Promise.all(
+      Array.from(printRoot.querySelectorAll("img")).map(
+        (img) =>
+          img.complete
+            ? Promise.resolve()
+            : new Promise<void>((resolve) => {
+                img.addEventListener("load", () => resolve(), { once: true });
+                img.addEventListener("error", () => resolve(), { once: true });
+              }),
+      ),
+    );
 
     const rootRect = printRoot.getBoundingClientRect();
     const avoidRanges: AvoidRange[] = Array.from(printRoot.querySelectorAll("[data-avoid-break]")).map((el) => {

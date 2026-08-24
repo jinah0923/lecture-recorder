@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import { ApiError, GoogleGenAI, Type, createPartFromUri, createUserContent } from "@google/genai";
-import type { File as GenAiFile } from "@google/genai";
+import { ApiError, GoogleGenAI, Type, createPartFromBase64, createPartFromUri, createUserContent } from "@google/genai";
+import type { File as GenAiFile, Part } from "@google/genai";
 
 export const runtime = "nodejs";
 // Long lectures (2-3h) mean upload + processing can run well past a few
@@ -29,6 +29,11 @@ type ChecklistItem = {
   id: string;
   text: string;
   done: boolean;
+};
+
+type IncomingSlideThumbnail = {
+  page: number;
+  dataUrl: string;
 };
 
 const MODEL = "gemini-3.6-flash";
@@ -98,6 +103,16 @@ function formatTimestamp(ms: number) {
 function normalizeMimeType(mimeType: string): string {
   const base = mimeType.split(";")[0].trim();
   return base || "application/octet-stream";
+}
+
+// "data:image/webp;base64,AAAA..." -> a Gemini inline-image Part. Slide
+// thumbnails arrive this way (client-rendered canvas exports), never as an
+// uploaded File, so they go in as inline base64 rather than through the
+// Files API used for the audio/reference document.
+function dataUrlToPart(dataUrl: string): Part | null {
+  const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+  if (!match) return null;
+  return createPartFromBase64(match[2], match[1]);
 }
 
 // Occasionally the model double-escapes newlines inside a JSON string value
@@ -223,6 +238,23 @@ export async function POST(request: Request) {
     }
   }
 
+  let slideThumbnails: IncomingSlideThumbnail[] = [];
+  const slideThumbnailsRaw = formData.get("slideThumbnails");
+  if (typeof slideThumbnailsRaw === "string" && slideThumbnailsRaw.length > 0) {
+    try {
+      const parsed = JSON.parse(slideThumbnailsRaw);
+      if (Array.isArray(parsed)) {
+        slideThumbnails = parsed.filter(
+          (item): item is IncomingSlideThumbnail =>
+            item && typeof item.page === "number" && typeof item.dataUrl === "string",
+        );
+      }
+    } catch {
+      // ignore malformed slide thumbnails, proceed without them
+    }
+  }
+  const hasSlideImages = slideThumbnails.length > 0;
+
   const ai = new GoogleGenAI({ apiKey });
 
   // Large lecture recordings (2-3h) and reference docs go through the Files
@@ -312,6 +344,16 @@ export async function POST(request: Request) {
     promptLines.push("- 강의자료가 첨부되지 않았으므로 음성 강의 내용만으로 최대한 상세하게 작성하세요.");
   }
 
+  if (hasSlideImages) {
+    promptLines.push(
+      "- [슬라이드 사진 연동] 첨부된 오디오 뒤에 강의 슬라이드 사진이 페이지 순서대로(슬라이드 1, 슬라이드 2, ...) 이어서 " +
+        "제공됩니다. 제공된 PDF 슬라이드 이미지(차트, 수식, 다이어그램)를 오디오 음성과 대조 분석하십시오. " +
+        "강의노트를 작성할 때 특정 차트나 슬라이드가 설명되는 단락 바로 아래에 반드시 `![슬라이드 X](slide_X)` " +
+        "형식으로 이미지 플레이스홀더를 삽입하십시오 (X는 해당 슬라이드의 페이지 번호). 실제로 차트/다이어그램/수식 등 " +
+        "시각 자료가 있어 사진으로 보여주는 것이 학습에 도움이 되는 슬라이드에만 삽입하고, 텍스트뿐인 슬라이드에는 남용하지 마세요.",
+    );
+  }
+
   if (keywords.length > 0) {
     promptLines.push(
       "",
@@ -335,7 +377,7 @@ export async function POST(request: Request) {
 
   const userPrompt = promptLines.join("\n");
 
-  const contentParts = [
+  const contentParts: (string | Part)[] = [
     userPrompt,
     createPartFromUri(uploadedAudio.uri ?? "", uploadedAudio.mimeType ?? "audio/webm"),
   ];
@@ -344,6 +386,15 @@ export async function POST(request: Request) {
       createPartFromUri(uploadedReference.uri ?? "", uploadedReference.mimeType ?? "application/pdf"),
     );
   }
+  // Inline (not Files API) — these are small, client-compressed thumbnails,
+  // well under Gemini's inline-data limit. Sent in page order so the "슬라이드
+  // 1, 슬라이드 2, ..." framing in the prompt above lines up with what the
+  // model actually sees.
+  const sortedThumbnails = [...slideThumbnails].sort((a, b) => a.page - b.page);
+  for (const thumbnail of sortedThumbnails) {
+    const part = dataUrlToPart(thumbnail.dataUrl);
+    if (part) contentParts.push(part);
+  }
 
   console.log("[transcribe-and-summarize] calling Gemini", {
     model: MODEL,
@@ -351,6 +402,7 @@ export async function POST(request: Request) {
     referenceFile: uploadedReference
       ? { uri: uploadedReference.uri, mimeType: uploadedReference.mimeType, name: uploadedReference.name }
       : null,
+    slideThumbnailCount: sortedThumbnails.length,
     promptChars: userPrompt.length,
     keywordCount: keywords.length,
     bookmarkCount: bookmarks.length,

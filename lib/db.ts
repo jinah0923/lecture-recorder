@@ -1,9 +1,13 @@
-import type { ChecklistFeedItem, LectureSession, LectureSessionSummary } from "@/lib/types";
+import type { ChecklistFeedItem, LectureSession, LectureSessionSummary, SlideImage } from "@/lib/types";
 
 const DB_NAME = "lecture-recorder";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const SESSION_STORE = "session";
 const CATEGORY_STORE = "categories";
+// Kept separate from SESSION_STORE — slide images are meaningfully larger
+// than the rest of a session's data, so they get their own store rather
+// than bloating every session read with image payloads it may not need.
+const SLIDE_IMAGE_STORE = "slideImages";
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -16,6 +20,9 @@ function openDb(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(CATEGORY_STORE)) {
         db.createObjectStore(CATEGORY_STORE, { keyPath: "name" });
+      }
+      if (!db.objectStoreNames.contains(SLIDE_IMAGE_STORE)) {
+        db.createObjectStore(SLIDE_IMAGE_STORE, { keyPath: "sessionId" });
       }
     };
 
@@ -56,6 +63,7 @@ export async function loadSessionById(id: string): Promise<LectureSession | null
 
 export async function deleteSession(id: string): Promise<void> {
   await runTransaction(SESSION_STORE, "readwrite", (store) => store.delete(id));
+  await deleteSlideImages(id);
 }
 
 export async function listSessions(): Promise<LectureSessionSummary[]> {
@@ -142,6 +150,23 @@ export async function saveCategories(categories: string[]): Promise<void> {
     };
     tx.onerror = () => reject(tx.error);
   });
+}
+
+export async function saveSlideImages(sessionId: string, images: SlideImage[]): Promise<void> {
+  await runTransaction(SLIDE_IMAGE_STORE, "readwrite", (store) => store.put({ sessionId, images }));
+}
+
+export async function loadSlideImages(sessionId: string): Promise<SlideImage[]> {
+  const result = await runTransaction<{ sessionId: string; images: SlideImage[] } | undefined>(
+    SLIDE_IMAGE_STORE,
+    "readonly",
+    (store) => store.get(sessionId),
+  );
+  return result?.images ?? [];
+}
+
+export async function deleteSlideImages(sessionId: string): Promise<void> {
+  await runTransaction(SLIDE_IMAGE_STORE, "readwrite", (store) => store.delete(sessionId));
 }
 
 export async function loadCategories(): Promise<string[]> {

@@ -10,6 +10,8 @@ type LectureNoteProps = {
    * whatever page is currently shown) for copy/download/Notion export and
    * IndexedDB persistence. */
   markdown: string;
+  /** Page number -> cached slide image, for `![슬라이드 N](slide_N)` placeholders. */
+  slideImages?: Map<number, string>;
 };
 
 // Character-count based (not a fixed section count) so a page holds roughly
@@ -63,7 +65,7 @@ function paginate(markdown: string): string[] {
   return pages;
 }
 
-export function LectureNote({ markdown }: LectureNoteProps) {
+export function LectureNote({ markdown, slideImages }: LectureNoteProps) {
   const contentRef = useRef<HTMLDivElement>(null);
   const [page, setPage] = useState(1);
 
@@ -92,7 +94,7 @@ export function LectureNote({ markdown }: LectureNoteProps) {
     <div>
       <div ref={contentRef} className="max-h-[32rem] overflow-y-auto rounded-xl bg-zinc-50 p-3 dark:bg-zinc-800/60">
         {currentMarkdown.trim() ? (
-          renderMarkdown(currentMarkdown)
+          renderMarkdown(currentMarkdown, slideImages)
         ) : (
           <p className="text-sm text-zinc-500 dark:text-zinc-400">상세 강의노트가 없습니다.</p>
         )}

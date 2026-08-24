@@ -19,6 +19,8 @@ type ReviewPanelProps = {
   onUpdateLectureNote: (nextLectureNote: string) => void;
   onUpdateTranscript: (nextTranscript: TranscriptSegment[]) => void;
   onSegmentCommitted?: (oldText: string, newText: string) => void;
+  /** Page number -> cached slide image, for `![슬라이드 N](slide_N)` placeholders. */
+  slideImages?: Map<number, string>;
 };
 
 function buildSummaryExportContent(aiResult: AiResult) {
@@ -63,6 +65,7 @@ export function ReviewPanel({
   onUpdateLectureNote,
   onUpdateTranscript,
   onSegmentCommitted,
+  slideImages,
 }: ReviewPanelProps) {
   const [summaryCopyLabel, setSummaryCopyLabel] = useState("클립보드 복사");
   const [noteCopyLabel, setNoteCopyLabel] = useState("클립보드 복사");
@@ -101,7 +104,7 @@ export function ReviewPanel({
     if (isExportingNotePdf) return;
     setIsExportingNotePdf(true);
     try {
-      await exportLectureNoteToPdf(aiResult.lectureNote, title);
+      await exportLectureNoteToPdf(aiResult.lectureNote, title, slideImages);
     } catch (error) {
       console.error("PDF 생성 실패:", error);
     } finally {
@@ -265,7 +268,7 @@ export function ReviewPanel({
             </button>
           </div>
         </div>
-        <LectureNote markdown={aiResult.lectureNote} />
+        <LectureNote markdown={aiResult.lectureNote} slideImages={slideImages} />
 
         <div className="mt-3 border-t border-zinc-100 pt-3 dark:border-zinc-800">
           <p className="mb-1.5 text-xs font-medium text-zinc-500 dark:text-zinc-400">🔍 더 알고 싶은 심화정보 / 추가 질문</p>

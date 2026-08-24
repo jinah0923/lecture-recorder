@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AudioPlayer } from "@/components/AudioPlayer";
 import { BookmarkPanel } from "@/components/BookmarkPanel";
 import { CategoryBadgeSelect } from "@/components/CategoryBadgeSelect";
@@ -10,8 +10,9 @@ import { ReattachAudioPrompt } from "@/components/ReattachAudioPrompt";
 import { ReferenceDocDropzone } from "@/components/ReferenceDocDropzone";
 import { ReviewPanel } from "@/components/ReviewPanel";
 import { probeAudioDurationMs } from "@/lib/audio";
-import { loadSessionById, saveSession } from "@/lib/db";
+import { loadSessionById, loadSlideImages, saveSession, saveSlideImages } from "@/lib/db";
 import { formatDateTime, formatFileSize } from "@/lib/format";
+import { buildSlideThumbnails, extractPdfSlides } from "@/lib/pdfSlides";
 import { extractChangedTerms, replaceAllOccurrences } from "@/lib/termDiff";
 import type {
   AiResult,
@@ -20,6 +21,7 @@ import type {
   LectureSession,
   ReferenceDocument,
   SessionAudio,
+  SlideImage,
   TranscriptSegment,
 } from "@/lib/types";
 
@@ -68,6 +70,17 @@ export function RecordingDetailView({
   // same treatment as the audio blob.
   const [referenceDoc, setReferenceDoc] = useState<ReferenceDocument | null>(null);
 
+  // Unlike referenceDoc's blob, the rendered slide images ARE persisted
+  // (their own IndexedDB store, see lib/db.ts) — they need to still be
+  // there when the user reopens this session later, long after the PDF
+  // itself is gone from memory.
+  const [slideImages, setSlideImages] = useState<SlideImage[]>([]);
+  const [isExtractingSlides, setIsExtractingSlides] = useState(false);
+  const slideImagesMap = useMemo(
+    () => new Map(slideImages.map((slide) => [slide.page, slide.dataUrl])),
+    [slideImages],
+  );
+
   // The actual audio Blob is never persisted — it only exists here, either
   // handed off fresh from NewRecordingView or re-attached by the user from
   // their device for this viewing session.
@@ -105,6 +118,9 @@ export function RecordingDetailView({
       setReferenceFileName(session.referenceFileName ?? "");
       setAiResult(session.aiResult);
       setHydrated(true);
+    });
+    loadSlideImages(sessionId).then((images) => {
+      if (!cancelled) setSlideImages(images);
     });
     return () => {
       cancelled = true;
@@ -180,6 +196,30 @@ export function RecordingDetailView({
     setCategory(name);
   }
 
+  // Extracting slide images is a nice-to-have on top of analysis, not a
+  // precondition for it — a failure here (corrupt PDF, browser lacking
+  // canvas/WebP support, etc.) is swallowed rather than blocking the
+  // attach, and the lecture note still generates fine without slide photos.
+  async function handleReferenceDocChange(doc: ReferenceDocument) {
+    setReferenceDoc(doc);
+    const isPdf = doc.mimeType === "application/pdf" || doc.name.toLowerCase().endsWith(".pdf");
+    if (!isPdf) {
+      setSlideImages([]);
+      return;
+    }
+    setIsExtractingSlides(true);
+    try {
+      const slides = await extractPdfSlides(doc.blob);
+      setSlideImages(slides);
+      await saveSlideImages(sessionId, slides);
+    } catch (error) {
+      console.error("슬라이드 이미지 추출 실패:", error);
+      setSlideImages([]);
+    } finally {
+      setIsExtractingSlides(false);
+    }
+  }
+
   async function handleReattach(file: File) {
     const probedMs = await probeAudioDurationMs(file);
     setLocalAudio({
@@ -229,6 +269,10 @@ export function RecordingDetailView({
       if (referenceDoc) {
         formData.append("reference", referenceDoc.blob, referenceDoc.name);
         setReferenceFileName(referenceDoc.name);
+      }
+      if (slideImages.length > 0) {
+        const thumbnails = await buildSlideThumbnails(slideImages);
+        formData.append("slideThumbnails", JSON.stringify(thumbnails));
       }
 
       const response = await fetch("/api/transcribe-and-summarize", {
@@ -421,9 +465,23 @@ export function RecordingDetailView({
           >
             <ReferenceDocDropzone
               document={referenceDoc}
-              onDocumentChange={setReferenceDoc}
-              onClear={() => setReferenceDoc(null)}
+              onDocumentChange={handleReferenceDocChange}
+              onClear={() => {
+                setReferenceDoc(null);
+                setSlideImages([]);
+              }}
             />
+            {isExtractingSlides && (
+              <p className="mt-2 flex items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400">
+                <span className="h-3 w-3 animate-spin rounded-full border-2 border-zinc-300 border-t-indigo-500 dark:border-zinc-700" />
+                슬라이드 이미지 추출 중...
+              </p>
+            )}
+            {!isExtractingSlides && slideImages.length > 0 && (
+              <p className="mt-2 text-xs text-emerald-600 dark:text-emerald-400">
+                🖼️ 슬라이드 {slideImages.length}장 추출 완료
+              </p>
+            )}
           </CollapsibleCard>
         </div>
       )}
@@ -475,6 +533,7 @@ export function RecordingDetailView({
           onUpdateLectureNote={updateLectureNote}
           onUpdateTranscript={updateTranscript}
           onSegmentCommitted={handleSegmentCommitted}
+          slideImages={slideImagesMap}
         />
       )}
 

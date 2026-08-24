@@ -26,6 +26,15 @@ export type ReferenceDocument = {
   blob: Blob;
 };
 
+// A single PDF reference-doc page, rendered client-side to an image.
+// Persisted separately from LectureSession (its own IndexedDB store, keyed
+// by sessionId) since it's meaningfully larger than the rest of a session's
+// data — see lib/db.ts's slideImages store.
+export type SlideImage = {
+  page: number;
+  dataUrl: string;
+};
+
 export type TranscriptSegment = {
   id: string;
   startMs: number;

@@ -142,6 +142,19 @@ function convertLectureNoteToBlocks(markdown: string): BlockObjectRequest[] {
       continue;
     }
 
+    // `![슬라이드 N](slide_N)` (see lib/markdown.tsx) — the actual image is a
+    // local data: URL the app cached client-side, which Notion's API can't
+    // accept (it only takes externally-hosted URLs), so this renders as a
+    // plain reference instead of broken markdown syntax.
+    const slideMatch = line.match(/^!\[[^\]]*\]\(slide_(\d+)\)$/);
+    if (slideMatch) {
+      blocks.push({
+        type: "paragraph",
+        paragraph: { rich_text: buildRichText(`🖼️ 슬라이드 ${slideMatch[1]} (이미지는 앱에서 확인해주세요)`) },
+      });
+      continue;
+    }
+
     const calloutEmoji = detectCalloutEmoji(line);
     if (calloutEmoji) {
       blocks.push({

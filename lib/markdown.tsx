@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { SlideImage } from "@/components/SlideImage";
 
 const CALLOUT_STYLES: Array<{ emoji: string; className: string }> = [
   {
@@ -60,7 +61,13 @@ function isTableSeparatorRow(line: string): boolean {
   return cells.length > 0 && cells.every((cell) => /^:?-+:?$/.test(cell));
 }
 
-export function renderMarkdown(markdown: string): ReactNode {
+// The AI is instructed to write `![슬라이드 N](slide_N)` right below the
+// paragraph that discusses that slide — matched against the actual cached
+// image via `slideImages` (page number -> data URL), passed down from
+// wherever the reference PDF's pages were extracted (lib/pdfSlides.ts).
+const SLIDE_IMAGE_PATTERN = /^!\[[^\]]*\]\(slide_(\d+)\)$/;
+
+export function renderMarkdown(markdown: string, slideImages?: Map<number, string>): ReactNode {
   const lines = markdown.split("\n");
   const blocks: ReactNode[] = [];
   let listBuffer: string[] = [];
@@ -177,6 +184,14 @@ export function renderMarkdown(markdown: string): ReactNode {
           {renderInline(headingMatch[2])}
         </p>,
       );
+      index++;
+      continue;
+    }
+
+    const slideMatch = line.match(SLIDE_IMAGE_PATTERN);
+    if (slideMatch) {
+      const page = Number(slideMatch[1]);
+      blocks.push(<SlideImage key={index} page={page} dataUrl={slideImages?.get(page)} />);
       index++;
       continue;
     }
