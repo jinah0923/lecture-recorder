@@ -2,6 +2,7 @@
 
 import { useRef, useState } from "react";
 import { probeAudioDurationMs } from "@/lib/audio";
+import { compressAudioForUpload } from "@/lib/audioCompressor";
 import { formatFileSize } from "@/lib/format";
 import type { SessionAudio } from "@/lib/types";
 
@@ -17,24 +18,31 @@ type AudioDropzoneProps = {
 export function AudioDropzone({ audio, disabled, onAudioChange, onClear }: AudioDropzoneProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [optimizeStatus, setOptimizeStatus] = useState<string | null>(null);
 
   async function applyFile(file: File) {
     if (!file.type.startsWith("audio/") && !/\.(mp3|wav|m4a|webm)$/i.test(file.name)) {
       return;
     }
     const durationMs = await probeAudioDurationMs(file);
-    onAudioChange({
-      kind: "upload",
-      name: file.name,
-      sizeLabel: formatFileSize(file.size),
-      blob: file,
-      mimeType: file.type || "audio/mpeg",
-      durationMs,
-    });
+
+    try {
+      const { blob, mimeType } = await compressAudioForUpload(file, setOptimizeStatus);
+      onAudioChange({
+        kind: "upload",
+        name: file.name,
+        sizeLabel: formatFileSize(blob.size),
+        blob,
+        mimeType,
+        durationMs,
+      });
+    } finally {
+      setOptimizeStatus(null);
+    }
   }
 
   function openPicker() {
-    if (disabled) return;
+    if (disabled || optimizeStatus) return;
     inputRef.current?.click();
   }
 
@@ -46,20 +54,20 @@ export function AudioDropzone({ audio, disabled, onAudioChange, onClear }: Audio
       <div
         role="button"
         tabIndex={disabled ? -1 : 0}
-        aria-disabled={disabled}
+        aria-disabled={disabled || Boolean(optimizeStatus)}
         onClick={openPicker}
         onKeyDown={(event) => {
           if (event.key === "Enter" || event.key === " ") openPicker();
         }}
         onDragOver={(event) => {
           event.preventDefault();
-          if (!disabled) setIsDragging(true);
+          if (!disabled && !optimizeStatus) setIsDragging(true);
         }}
         onDragLeave={() => setIsDragging(false)}
         onDrop={(event) => {
           event.preventDefault();
           setIsDragging(false);
-          if (disabled) return;
+          if (disabled || optimizeStatus) return;
           const file = event.dataTransfer.files[0];
           if (file) void applyFile(file);
         }}
@@ -67,16 +75,22 @@ export function AudioDropzone({ audio, disabled, onAudioChange, onClear }: Audio
           isDragging
             ? "border-indigo-400 bg-indigo-50 dark:border-indigo-600 dark:bg-indigo-950/30"
             : "border-slate-200 bg-zinc-50 hover:border-zinc-300 hover:bg-zinc-100/70 dark:border-zinc-800 dark:bg-zinc-800/40 dark:hover:border-zinc-700 dark:hover:bg-zinc-800/70"
-        } ${disabled ? "cursor-not-allowed opacity-50" : ""}`}
+        } ${disabled || optimizeStatus ? "cursor-not-allowed opacity-50" : ""}`}
       >
-        <span className="mb-2 flex h-10 w-10 items-center justify-center rounded-full bg-white text-zinc-500 shadow-sm dark:bg-zinc-900 dark:text-zinc-400">
-          <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8">
-            <path d="M12 16V4" strokeLinecap="round" />
-            <path d="M8 8l4-4 4 4" strokeLinecap="round" strokeLinejoin="round" />
-            <path d="M5 16v2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2" strokeLinecap="round" />
-          </svg>
-        </span>
-        {audio ? (
+        {optimizeStatus ? (
+          <span className="mb-2 h-10 w-10 animate-spin rounded-full border-2 border-zinc-300 border-t-indigo-500 dark:border-zinc-700" />
+        ) : (
+          <span className="mb-2 flex h-10 w-10 items-center justify-center rounded-full bg-white text-zinc-500 shadow-sm dark:bg-zinc-900 dark:text-zinc-400">
+            <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8">
+              <path d="M12 16V4" strokeLinecap="round" />
+              <path d="M8 8l4-4 4 4" strokeLinecap="round" strokeLinejoin="round" />
+              <path d="M5 16v2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2" strokeLinecap="round" />
+            </svg>
+          </span>
+        )}
+        {optimizeStatus ? (
+          <p className="text-sm font-medium text-indigo-600 dark:text-indigo-400">{optimizeStatus}</p>
+        ) : audio ? (
           <div className="flex w-full max-w-full items-start justify-center gap-2 px-2">
             <div className="min-w-0">
               <p className="truncate text-sm font-medium text-zinc-800 dark:text-zinc-200">{audio.name}</p>

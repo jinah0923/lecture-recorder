@@ -25,7 +25,7 @@ import type {
   TranscriptSegment,
 } from "@/lib/types";
 
-const PROGRESS_STAGES = ["오디오 업로드 중...", "음성 인식(STT) 진행 중...", "AI 요약 생성 중..."];
+const PROGRESS_STAGES = ["서버 분석 요청 중...", "음성 인식(STT) 진행 중...", "AI 요약 생성 중..."];
 // Matches TranscriptPanel's own debounce so a script edit lands in IndexedDB
 // ~300ms after the user stops typing, not 300ms + a second, longer debounce
 // stacked on top.
