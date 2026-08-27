@@ -356,10 +356,38 @@ function renderSectionBodyHtml(sectionId: PdfSectionId, data: PdfExportData): st
 // full, untouched source — same data-preservation principle as copy/.txt/.md
 // download and Notion export. Every section after the first is marked with
 // data-section-start so computePageSlices forces it onto a fresh page.
+// Next.js's webpack build splits html2canvas/jspdf into separate chunks
+// fetched on demand (see the dynamic import below, which also keeps them
+// out of the server bundle). That fetch can fail — a stale service worker
+// or a deployed build hash the browser's cache doesn't know about yet —
+// surfacing as a `ChunkLoadError` rather than anything about PDF export
+// itself, so it needs its own detection and message.
+function isChunkLoadError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return (
+    error.name === "ChunkLoadError" ||
+    /loading chunk .+ failed/i.test(error.message) ||
+    /failed to fetch dynamically imported module/i.test(error.message)
+  );
+}
+
 export async function exportSectionsToPdf(sections: PdfSectionId[], data: PdfExportData): Promise<void> {
   if (sections.length === 0) return;
 
-  const [{ default: html2canvas }, { jsPDF }] = await Promise.all([import("html2canvas"), import("jspdf")]);
+  let html2canvas: typeof import("html2canvas").default;
+  let jsPDF: typeof import("jspdf").jsPDF;
+  try {
+    const [html2canvasModule, jsPdfModule] = await Promise.all([import("html2canvas"), import("jspdf")]);
+    html2canvas = html2canvasModule.default;
+    jsPDF = jsPdfModule.jsPDF;
+  } catch (error) {
+    if (isChunkLoadError(error)) {
+      window.alert("브라우저 캐시 문제로 PDF 모듈을 불러오지 못했습니다. 페이지가 새로고침됩니다.");
+      window.location.reload();
+      return;
+    }
+    throw error;
+  }
 
   const iframe = document.createElement("iframe");
   iframe.style.position = "fixed";
