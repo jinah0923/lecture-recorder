@@ -2,7 +2,17 @@ import { NextResponse } from "next/server";
 import { ApiError, GoogleGenAI, Type, createPartFromBase64, createPartFromUri, createUserContent } from "@google/genai";
 import type { File as GenAiFile, Part } from "@google/genai";
 
-export const runtime = "nodejs";
+// Edge, not Node.js — a plain (non-streaming) Serverless Function response
+// on Vercel is held open until the whole handler returns, and once nothing
+// has been written back to the client for a while, Vercel's proxy — or the
+// browser's own fetch — treats the connection as dead and the client sees
+// "Failed to fetch" long before a 1h lecture's upload + transcription
+// actually finishes. Edge Functions don't have that same idle-connection
+// behavior, and combined with the SSE response below (see POST), bytes
+// keep flowing to the client the whole time instead of going silent.
+// @google/genai resolves to its browser/fetch-based build outside Node
+// (see its package.json "exports"), which is what makes this swap safe.
+export const runtime = "edge";
 // Long lectures (2-3h) mean upload + processing can run well past a few
 // minutes. Capped at 300s to match Vercel Hobby's plan ceiling — a hosting
 // upgrade would allow raising this again for very long recordings.
@@ -159,6 +169,78 @@ function describeGeminiError(error: unknown): string {
   return `Gemini 분석 실패: ${message}`;
 }
 
+const GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com";
+// Matches @google/genai's own chunk size for the same upload protocol below.
+const UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
+
+// @google/genai's own `ai.files.upload()` sets a literal `Content-Length`
+// header on each upload chunk request (see its uploadBlobInternal) — a name
+// the Fetch spec lists as forbidden for scripts to set manually. Node's
+// fetch tolerates it, but Edge Runtime enforces the spec strictly and the
+// request fails outright with a bare "fetch failed", no matter the file
+// size (confirmed directly against this exact SDK call under `next dev`'s
+// edge sandbox). So file upload is hand-rolled here against the same public
+// resumable-upload REST protocol instead — every other Files/Models call
+// below still goes through the SDK as normal, since it's only this one
+// header on this one call that edge rejects.
+async function uploadFileToGemini(
+  apiKey: string,
+  file: File,
+  displayName: string,
+  mimeType: string,
+): Promise<GenAiFile> {
+  const startResponse = await fetch(`${GEMINI_API_BASE_URL}/upload/v1beta/files?key=${apiKey}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Goog-Upload-Protocol": "resumable",
+      "X-Goog-Upload-Command": "start",
+      "X-Goog-Upload-Header-Content-Length": String(file.size),
+      "X-Goog-Upload-Header-Content-Type": mimeType,
+    },
+    body: JSON.stringify({ file: { displayName } }),
+  });
+  if (!startResponse.ok) {
+    throw new Error(`파일 업로드 세션을 시작하지 못했습니다 (HTTP ${startResponse.status}).`);
+  }
+  const uploadUrl = startResponse.headers.get("x-goog-upload-url");
+  if (!uploadUrl) {
+    throw new Error("업로드 URL을 받지 못했습니다.");
+  }
+
+  let offset = 0;
+  let finalFile: GenAiFile | undefined;
+  while (offset < file.size) {
+    const chunkSize = Math.min(UPLOAD_CHUNK_BYTES, file.size - offset);
+    const chunk = file.slice(offset, offset + chunkSize);
+    const isFinalChunk = offset + chunkSize >= file.size;
+
+    const uploadResponse = await fetch(uploadUrl, {
+      method: "POST",
+      headers: {
+        "X-Goog-Upload-Command": isFinalChunk ? "upload, finalize" : "upload",
+        "X-Goog-Upload-Offset": String(offset),
+      },
+      // No Content-Length header — fetch computes it from the Blob chunk
+      // itself, which is exactly what a spec-compliant edge fetch requires.
+      body: chunk,
+    });
+    if (!uploadResponse.ok) {
+      throw new Error(`파일 업로드에 실패했습니다 (HTTP ${uploadResponse.status}).`);
+    }
+    offset += chunkSize;
+    if (isFinalChunk) {
+      const json = (await uploadResponse.json()) as { file?: GenAiFile };
+      finalFile = json.file;
+    }
+  }
+
+  if (!finalFile) {
+    throw new Error("파일 업로드 응답을 확인하지 못했습니다.");
+  }
+  return finalFile;
+}
+
 // Uploaded files start in PROCESSING and must reach ACTIVE before they can
 // be referenced in a generateContent call.
 async function waitForFileActive(ai: GoogleGenAI, file: GenAiFile): Promise<GenAiFile> {
@@ -190,10 +272,19 @@ async function deleteUploadedFile(ai: GoogleGenAI, file: GenAiFile | null): Prom
 type RawSttResponse = { hasSpeech?: unknown; script?: unknown };
 type RawAnalysisResponse = { summary?: unknown; lectureNote?: unknown; checklist?: unknown };
 
+// Called with each raw text fragment Gemini streams back, from both workers
+// concurrently — the POST handler below forwards these straight through to
+// the client as SSE "chunk" events. Their content is never parsed on its own
+// (each fragment is an incomplete slice of one JSON document, not valid JSON
+// by itself); their only job is to keep bytes flowing so the connection
+// never goes idle long enough to look dead. The full JSON is only parsed
+// once each worker's stream ends, from the fully accumulated text.
+type ChunkListener = (worker: "stt" | "analysis", text: string) => void;
+
 // Worker A — STT only. Its entire maxOutputTokens budget goes toward the
 // verbatim transcript alone, so a long lecture no longer competes with the
 // lecture note for the same token ceiling.
-async function callSttWorker(ai: GoogleGenAI, uploadedAudio: GenAiFile): Promise<RawSttResponse> {
+async function callSttWorker(ai: GoogleGenAI, uploadedAudio: GenAiFile, onChunk: ChunkListener): Promise<RawSttResponse> {
   const systemInstruction = [
     "당신은 강의 녹음 오디오를 한 글자도 빠짐없이 받아쓰는 음성 인식(STT) 전문 어시스턴트입니다.",
     "반드시 지정된 JSON 스키마 형식으로만, 한국어로 응답하세요.",
@@ -220,7 +311,7 @@ async function callSttWorker(ai: GoogleGenAI, uploadedAudio: GenAiFile): Promise
     audioFile: { uri: uploadedAudio.uri, mimeType: uploadedAudio.mimeType, name: uploadedAudio.name },
   });
 
-  const response = await ai.models.generateContent({
+  const stream = await ai.models.generateContentStream({
     model: MODEL,
     contents: createUserContent([
       userPrompt,
@@ -234,14 +325,22 @@ async function callSttWorker(ai: GoogleGenAI, uploadedAudio: GenAiFile): Promise
     },
   });
 
-  if (response.promptFeedback?.blockReason) {
-    throw new Error("안전 정책으로 인해 이 요청을 처리할 수 없습니다. 다른 파일로 시도해주세요.");
+  let accumulated = "";
+  for await (const chunk of stream) {
+    if (chunk.promptFeedback?.blockReason) {
+      throw new Error("안전 정책으로 인해 이 요청을 처리할 수 없습니다. 다른 파일로 시도해주세요.");
+    }
+    if (chunk.text) {
+      accumulated += chunk.text;
+      onChunk("stt", chunk.text);
+    }
   }
-  if (!response.text) {
+
+  if (!accumulated) {
     throw new Error("AI로부터 스크립트 응답을 받지 못했습니다. 다시 시도해주세요.");
   }
   try {
-    return JSON.parse(response.text);
+    return JSON.parse(accumulated);
   } catch {
     throw new Error("스크립트 응답을 해석하는 데 실패했습니다. 다시 시도해주세요.");
   }
@@ -257,6 +356,7 @@ async function callAnalysisWorker(
   slideThumbnails: IncomingSlideThumbnail[],
   keywords: string[],
   bookmarkLines: string,
+  onChunk: ChunkListener,
 ): Promise<RawAnalysisResponse> {
   const hasReference = uploadedReference !== null;
   const hasSlideImages = slideThumbnails.length > 0;
@@ -378,7 +478,7 @@ async function callAnalysisWorker(
     bookmarkCount: bookmarkLines ? bookmarkLines.split("\n").length : 0,
   });
 
-  const response = await ai.models.generateContent({
+  const stream = await ai.models.generateContentStream({
     model: MODEL,
     contents: createUserContent(contentParts),
     config: {
@@ -389,14 +489,22 @@ async function callAnalysisWorker(
     },
   });
 
-  if (response.promptFeedback?.blockReason) {
-    throw new Error("안전 정책으로 인해 이 요청을 처리할 수 없습니다. 다른 파일로 시도해주세요.");
+  let accumulated = "";
+  for await (const chunk of stream) {
+    if (chunk.promptFeedback?.blockReason) {
+      throw new Error("안전 정책으로 인해 이 요청을 처리할 수 없습니다. 다른 파일로 시도해주세요.");
+    }
+    if (chunk.text) {
+      accumulated += chunk.text;
+      onChunk("analysis", chunk.text);
+    }
   }
-  if (!response.text) {
+
+  if (!accumulated) {
     throw new Error("AI로부터 분석 응답을 받지 못했습니다. 다시 시도해주세요.");
   }
   try {
-    return JSON.parse(response.text);
+    return JSON.parse(accumulated);
   } catch {
     throw new Error("분석 응답을 해석하는 데 실패했습니다. 다시 시도해주세요.");
   }
@@ -491,120 +599,173 @@ export async function POST(request: Request) {
 
   const ai = new GoogleGenAI({ apiKey });
 
-  // Large lecture recordings (2-3h) and reference docs go through the Files
-  // API (upload once, reference by URI) instead of inline base64 — inline
-  // data tops out around ~20MB per request, far too small for a full lecture.
-  let uploadedAudio: GenAiFile;
-  try {
-    console.log("[transcribe-and-summarize] uploading audio to Gemini Files API", {
-      name: audioFile.name,
-      sizeBytes: audioFile.size,
-      mimeType: audioFile.type,
-    });
-    uploadedAudio = await ai.files.upload({
-      file: audioFile,
-      config: { mimeType: normalizeMimeType(audioFile.type || "audio/webm"), displayName: audioFile.name },
-    });
-    uploadedAudio = await waitForFileActive(ai, uploadedAudio);
-  } catch (error) {
-    console.error("[transcribe-and-summarize] audio upload failed", { error });
-    return NextResponse.json({ error: `오디오 처리 실패: ${describeGeminiError(error)}` }, { status: 502 });
-  }
+  // Everything from here on can run long enough (large-file upload,
+  // Gemini generation for a 1h+ lecture) to sit through Vercel's idle-
+  // connection cutoff if sent back as one plain JSON response — so instead
+  // this streams Server-Sent Events the whole way: "chunk" events (raw
+  // Gemini stream fragments, forwarded purely to keep bytes flowing —
+  // never meaningful on their own) and a final "done" event carrying the
+  // exact same JSON payload this route used to return directly. See
+  // ChunkListener above and the runtime/edge comment below.
+  const encoder = new TextEncoder();
 
-  let uploadedReference: GenAiFile | null = null;
-  if (hasReference) {
-    try {
-      const refFile = referenceFile as File;
-      console.log("[transcribe-and-summarize] uploading reference doc to Gemini Files API", {
-        name: refFile.name,
-        sizeBytes: refFile.size,
-        mimeType: refFile.type,
-      });
-      uploadedReference = await ai.files.upload({
-        file: refFile,
-        config: { mimeType: normalizeMimeType(refFile.type || "application/pdf"), displayName: refFile.name },
-      });
-      uploadedReference = await waitForFileActive(ai, uploadedReference);
-    } catch (error) {
-      console.error("[transcribe-and-summarize] reference upload failed", { error });
-      await deleteUploadedFile(ai, uploadedAudio);
-      return NextResponse.json({ error: `참고자료 처리 실패: ${describeGeminiError(error)}` }, { status: 502 });
-    }
-  }
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      let closed = false;
+      function send(event: string, data: unknown) {
+        if (closed) return;
+        controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+      }
+      function sendChunk(worker: "stt" | "analysis", text: string) {
+        send("chunk", { worker, text });
+      }
 
-  const bookmarkLines = bookmarks
-    .map((bookmark) => `- [${formatTimestamp(bookmark.atMs)}] ${bookmark.label}`)
-    .join("\n");
+      // Covers the upload + Gemini-side file-processing wait, before either
+      // worker's own stream has produced its first chunk — otherwise a large
+      // file's upload/processing time alone could leave the connection
+      // silent long enough to look dead.
+      const heartbeat = setInterval(() => {
+        if (closed) return;
+        controller.enqueue(encoder.encode(`: keepalive\n\n`));
+      }, 15000);
 
-  // Two independent Gemini calls in parallel — see callSttWorker/
-  // callAnalysisWorker above for why this replaced the old single combined
-  // call. Both reference the same already-uploaded audio file (no re-upload).
-  let sttResult: RawSttResponse;
-  let analysisResult: RawAnalysisResponse;
-  try {
-    [sttResult, analysisResult] = await Promise.all([
-      callSttWorker(ai, uploadedAudio),
-      callAnalysisWorker(ai, uploadedAudio, uploadedReference, slideThumbnails, keywords, bookmarkLines),
-    ]);
-  } catch (error) {
-    console.error("[transcribe-and-summarize] Gemini call failed", {
-      model: MODEL,
-      status: error instanceof ApiError ? error.status : undefined,
-      error,
-    });
-    return NextResponse.json({ error: describeGeminiError(error) }, { status: 502 });
-  } finally {
-    // Best-effort cleanup — Files API entries auto-expire after 48h anyway,
-    // so a failed delete here isn't worth surfacing to the user.
-    await deleteUploadedFile(ai, uploadedAudio);
-    if (uploadedReference) await deleteUploadedFile(ai, uploadedReference);
-  }
+      try {
+        // Large lecture recordings (2-3h) and reference docs go through the
+        // Files API (upload once, reference by URI) instead of inline
+        // base64 — inline data tops out around ~20MB per request, far too
+        // small for a full lecture.
+        let uploadedAudio: GenAiFile;
+        try {
+          console.log("[transcribe-and-summarize] uploading audio to Gemini Files API", {
+            name: audioFile.name,
+            sizeBytes: audioFile.size,
+            mimeType: audioFile.type,
+          });
+          uploadedAudio = await uploadFileToGemini(
+            apiKey,
+            audioFile,
+            audioFile.name,
+            normalizeMimeType(audioFile.type || "audio/webm"),
+          );
+          uploadedAudio = await waitForFileActive(ai, uploadedAudio);
+        } catch (error) {
+          console.error("[transcribe-and-summarize] audio upload failed", { error });
+          throw new Error(`오디오 처리 실패: ${describeGeminiError(error)}`);
+        }
 
-  const rawSegments = Array.isArray(sttResult.script) ? sttResult.script : [];
-  // The STT worker is authoritative for hasSpeech — it's the one that
-  // actually listened through the whole file. If it found no speech, the
-  // analysis worker's output (which may have run against the reference PDF
-  // regardless) is discarded rather than risking fabricated notes.
-  const hasSpeech = sttResult.hasSpeech === true && rawSegments.length > 0;
+        let uploadedReference: GenAiFile | null = null;
+        if (hasReference) {
+          try {
+            const refFile = referenceFile as File;
+            console.log("[transcribe-and-summarize] uploading reference doc to Gemini Files API", {
+              name: refFile.name,
+              sizeBytes: refFile.size,
+              mimeType: refFile.type,
+            });
+            uploadedReference = await uploadFileToGemini(
+              apiKey,
+              refFile,
+              refFile.name,
+              normalizeMimeType(refFile.type || "application/pdf"),
+            );
+            uploadedReference = await waitForFileActive(ai, uploadedReference);
+          } catch (error) {
+            console.error("[transcribe-and-summarize] reference upload failed", { error });
+            await deleteUploadedFile(ai, uploadedAudio);
+            throw new Error(`참고자료 처리 실패: ${describeGeminiError(error)}`);
+          }
+        }
 
-  if (!hasSpeech) {
-    return NextResponse.json({
-      transcript: [{ id: "seg-0", startMs: 0, endMs: 0, text: NO_SPEECH_TRANSCRIPT }],
-      fullText: NO_SPEECH_TRANSCRIPT,
-      summary: NO_SPEECH_SUMMARY,
-      lectureNote: NO_SPEECH_NOTE,
-      checklist: [],
-    });
-  }
+        const bookmarkLines = bookmarks
+          .map((bookmark) => `- [${formatTimestamp(bookmark.atMs)}] ${bookmark.label}`)
+          .join("\n");
 
-  const transcript: TranscriptSegment[] = rawSegments.map((segment, index) => {
-    const s = segment as { startSeconds?: unknown; endSeconds?: unknown; text?: unknown };
-    return {
-      id: `seg-${index}`,
-      startMs: Math.round(Number(s.startSeconds ?? 0) * 1000),
-      endMs: Math.round(Number(s.endSeconds ?? 0) * 1000),
-      text: typeof s.text === "string" ? fixEscapedNewlines(s.text.trim()) : "",
-    };
+        // Two independent Gemini calls in parallel — see callSttWorker/
+        // callAnalysisWorker above for why this replaced the old single
+        // combined call. Both reference the same already-uploaded audio
+        // file (no re-upload), and both now stream their own output back
+        // as "chunk" events via sendChunk as soon as the first one starts
+        // producing tokens, well before the heartbeat above would fire again.
+        let sttResult: RawSttResponse;
+        let analysisResult: RawAnalysisResponse;
+        try {
+          [sttResult, analysisResult] = await Promise.all([
+            callSttWorker(ai, uploadedAudio, sendChunk),
+            callAnalysisWorker(ai, uploadedAudio, uploadedReference, slideThumbnails, keywords, bookmarkLines, sendChunk),
+          ]);
+        } catch (error) {
+          console.error("[transcribe-and-summarize] Gemini call failed", {
+            model: MODEL,
+            status: error instanceof ApiError ? error.status : undefined,
+            error,
+          });
+          throw new Error(describeGeminiError(error));
+        } finally {
+          // Best-effort cleanup — Files API entries auto-expire after 48h
+          // anyway, so a failed delete here isn't worth surfacing to the user.
+          await deleteUploadedFile(ai, uploadedAudio);
+          if (uploadedReference) await deleteUploadedFile(ai, uploadedReference);
+        }
+
+        const rawSegments = Array.isArray(sttResult.script) ? sttResult.script : [];
+        // The STT worker is authoritative for hasSpeech — it's the one that
+        // actually listened through the whole file. If it found no speech,
+        // the analysis worker's output (which may have run against the
+        // reference PDF regardless) is discarded rather than risking
+        // fabricated notes.
+        const hasSpeech = sttResult.hasSpeech === true && rawSegments.length > 0;
+
+        if (!hasSpeech) {
+          send("done", {
+            transcript: [{ id: "seg-0", startMs: 0, endMs: 0, text: NO_SPEECH_TRANSCRIPT }],
+            fullText: NO_SPEECH_TRANSCRIPT,
+            summary: NO_SPEECH_SUMMARY,
+            lectureNote: NO_SPEECH_NOTE,
+            checklist: [],
+          });
+          return;
+        }
+
+        const transcript: TranscriptSegment[] = rawSegments.map((segment, index) => {
+          const s = segment as { startSeconds?: unknown; endSeconds?: unknown; text?: unknown };
+          return {
+            id: `seg-${index}`,
+            startMs: Math.round(Number(s.startSeconds ?? 0) * 1000),
+            endMs: Math.round(Number(s.endSeconds ?? 0) * 1000),
+            text: typeof s.text === "string" ? fixEscapedNewlines(s.text.trim()) : "",
+          };
+        });
+
+        const fullText = transcript.map((segment) => segment.text).join(" ").trim();
+        const summary =
+          typeof analysisResult.summary === "string" ? fixEscapedNewlines(analysisResult.summary.trim()) : "";
+        const lectureNote =
+          typeof analysisResult.lectureNote === "string" ? fixEscapedNewlines(analysisResult.lectureNote.trim()) : "";
+        const checklistTexts = Array.isArray(analysisResult.checklist)
+          ? analysisResult.checklist.filter((item): item is string => typeof item === "string")
+          : [];
+        const checklist: ChecklistItem[] = checklistTexts.map((text, index) => ({
+          id: `check-${index}`,
+          text: fixEscapedNewlines(text),
+          done: false,
+        }));
+
+        send("done", { transcript, fullText, summary, lectureNote, checklist });
+      } catch (error) {
+        send("error", { error: error instanceof Error ? error.message : "AI 분석에 실패했습니다." });
+      } finally {
+        clearInterval(heartbeat);
+        closed = true;
+        controller.close();
+      }
+    },
   });
 
-  const fullText = transcript.map((segment) => segment.text).join(" ").trim();
-  const summary = typeof analysisResult.summary === "string" ? fixEscapedNewlines(analysisResult.summary.trim()) : "";
-  const lectureNote =
-    typeof analysisResult.lectureNote === "string" ? fixEscapedNewlines(analysisResult.lectureNote.trim()) : "";
-  const checklistTexts = Array.isArray(analysisResult.checklist)
-    ? analysisResult.checklist.filter((item): item is string => typeof item === "string")
-    : [];
-  const checklist: ChecklistItem[] = checklistTexts.map((text, index) => ({
-    id: `check-${index}`,
-    text: fixEscapedNewlines(text),
-    done: false,
-  }));
-
-  return NextResponse.json({
-    transcript,
-    fullText,
-    summary,
-    lectureNote,
-    checklist,
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+    },
   });
 }

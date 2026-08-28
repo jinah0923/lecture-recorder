@@ -13,6 +13,7 @@ import { probeAudioDurationMs } from "@/lib/audio";
 import { loadSessionById, loadSlideImages, saveSession, saveSlideImages } from "@/lib/db";
 import { formatDateTime, formatFileSize } from "@/lib/format";
 import { buildSlideThumbnails, extractPdfSlides } from "@/lib/pdfSlides";
+import { readSseStream } from "@/lib/sse";
 import { extractChangedTerms, replaceAllOccurrences } from "@/lib/termDiff";
 import type {
   AiResult,
@@ -280,9 +281,42 @@ export function RecordingDetailView({
         body: formData,
       });
 
-      const data = await response.json();
+      // Fast-fail validation (missing/empty/oversized file, missing server
+      // API key) never reaches the SSE stream below — the route returns a
+      // plain JSON error for those instead of starting to stream. See
+      // app/api/transcribe-and-summarize/route.ts.
       if (!response.ok) {
-        throw new Error(data?.error ?? "분석에 실패했습니다.");
+        const errorBody = await response.json().catch(() => null);
+        throw new Error(errorBody?.error ?? "분석에 실패했습니다.");
+      }
+      if (!response.body) {
+        throw new Error("서버 응답을 스트리밍으로 받지 못했습니다. 다시 시도해주세요.");
+      }
+
+      // The server streams SSE events the entire time it's uploading and
+      // transcribing (see route.ts) purely to keep the connection alive
+      // during a long (1h+) lecture — intermediate "chunk" events carry
+      // incomplete JSON fragments and are only useful as that keepalive
+      // signal, so they're discarded here. Only once the terminal "done"
+      // event arrives is there a complete result to parse.
+      let data: {
+        transcript?: TranscriptSegment[];
+        fullText?: string;
+        summary?: string;
+        lectureNote?: string;
+        checklist?: ChecklistItem[];
+      } | null = null;
+
+      for await (const { event, data: payload } of readSseStream(response.body)) {
+        if (event === "done") {
+          data = JSON.parse(payload);
+        } else if (event === "error") {
+          throw new Error((JSON.parse(payload) as { error?: string }).error ?? "분석에 실패했습니다.");
+        }
+      }
+
+      if (!data) {
+        throw new Error("분석 응답을 받지 못했습니다. 다시 시도해주세요.");
       }
 
       const checklist: ChecklistItem[] = data.checklist ?? [];
