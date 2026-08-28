@@ -91,6 +91,20 @@ export async function listSessions(): Promise<LectureSessionSummary[]> {
   });
 }
 
+// Full records, unlike listSessions()'s summaries — needed wherever the
+// complete aiResult must round-trip somewhere else (e.g. cloud sync).
+export async function loadAllSessions(): Promise<LectureSession[]> {
+  const db = await openDb();
+  return new Promise<LectureSession[]>((resolve, reject) => {
+    const tx = db.transaction(SESSION_STORE, "readonly");
+    const store = tx.objectStore(SESSION_STORE);
+    const request = store.getAll();
+    request.onsuccess = () => resolve(request.result as LectureSession[]);
+    request.onerror = () => reject(request.error);
+    tx.oncomplete = () => db.close();
+  });
+}
+
 export async function listAllChecklistItems(): Promise<ChecklistFeedItem[]> {
   const db = await openDb();
   return new Promise<ChecklistFeedItem[]>((resolve, reject) => {

@@ -15,6 +15,7 @@ import {
   saveCategories,
   toggleSessionChecklistItem,
 } from "@/lib/db";
+import { getSyncKey, mergeAndSync, pushLocalSessions } from "@/lib/sync";
 import type { ChecklistFeedItem, LectureSessionSummary, SessionAudio } from "@/lib/types";
 
 type Screen =
@@ -47,6 +48,11 @@ export function LectureStudio() {
   const refreshAll = useCallback(() => {
     refreshSessions();
     refreshChecklistFeed();
+    // The edit that triggered this refresh is already the newest version of
+    // whatever changed, so this only needs to push it — pulling the cloud
+    // first would just be a redundant round trip. See lib/sync.ts.
+    const syncKey = getSyncKey();
+    if (syncKey) pushLocalSessions(syncKey).catch(() => {});
   }, [refreshSessions, refreshChecklistFeed]);
 
   const handleCategoryCreated = useCallback((name: string) => {
@@ -69,7 +75,20 @@ export function LectureStudio() {
         setLoaded(true);
       },
     );
-  }, []);
+
+    // If this device already has an active sync key, pull whatever changed
+    // on other devices since last time and merge it in — shows local data
+    // immediately above (not gated on this) and refreshes once it lands.
+    const syncKey = getSyncKey();
+    if (syncKey) {
+      mergeAndSync(syncKey)
+        .then(() => {
+          refreshSessions();
+          refreshChecklistFeed();
+        })
+        .catch(() => {});
+    }
+  }, [refreshSessions, refreshChecklistFeed]);
 
   const categorySummaries = useMemo(() => {
     const map = new Map<string, { count: number; updatedAt: number }>();
