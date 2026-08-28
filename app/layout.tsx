@@ -1,7 +1,8 @@
 import type { Metadata, Viewport } from "next";
 import { ThemeProvider } from "next-themes";
+import { AccountButton } from "@/components/AccountButton";
+import { AuthProvider } from "@/components/AuthProvider";
 import { ServiceWorkerRegister } from "@/components/ServiceWorkerRegister";
-import { SyncButton } from "@/components/SyncButton";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import "./globals.css";
 
@@ -55,11 +56,13 @@ export default function RootLayout({
     // matching the server-rendered markup.
     <html lang="en" suppressHydrationWarning>
       <body className="min-h-screen bg-white text-zinc-900 antialiased transition-colors dark:bg-zinc-950 dark:text-zinc-100">
-        <ThemeProvider attribute="class" defaultTheme="light" enableSystem={false}>
-          <SyncButton />
-          <ThemeToggle />
-          {children}
-        </ThemeProvider>
+        <AuthProvider>
+          <ThemeProvider attribute="class" defaultTheme="light" enableSystem={false}>
+            <AccountButton />
+            <ThemeToggle />
+            {children}
+          </ThemeProvider>
+        </AuthProvider>
         <ServiceWorkerRegister />
       </body>
     </html>

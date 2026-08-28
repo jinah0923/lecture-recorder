@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useSession } from "next-auth/react";
 import { AddCategoryModal } from "@/components/AddCategoryModal";
 import { AlbumView } from "@/components/AlbumView";
 import { CategoryListView } from "@/components/CategoryListView";
@@ -15,7 +16,7 @@ import {
   saveCategories,
   toggleSessionChecklistItem,
 } from "@/lib/db";
-import { getSyncKey, mergeAndSync, pushLocalSessions } from "@/lib/sync";
+import { mergeAndSync, pushLocalSessions } from "@/lib/sync";
 import type { ChecklistFeedItem, LectureSessionSummary, SessionAudio } from "@/lib/types";
 
 type Screen =
@@ -25,6 +26,7 @@ type Screen =
   | { kind: "detail"; sessionId: string };
 
 export function LectureStudio() {
+  const { status: authStatus } = useSession();
   const [screenStack, setScreenStack] = useState<Screen[]>([{ kind: "albums" }]);
   const screen = screenStack[screenStack.length - 1];
 
@@ -51,9 +53,8 @@ export function LectureStudio() {
     // The edit that triggered this refresh is already the newest version of
     // whatever changed, so this only needs to push it — pulling the cloud
     // first would just be a redundant round trip. See lib/sync.ts.
-    const syncKey = getSyncKey();
-    if (syncKey) pushLocalSessions(syncKey).catch(() => {});
-  }, [refreshSessions, refreshChecklistFeed]);
+    if (authStatus === "authenticated") pushLocalSessions().catch(() => {});
+  }, [refreshSessions, refreshChecklistFeed, authStatus]);
 
   const handleCategoryCreated = useCallback((name: string) => {
     setCategories((prev) => {
@@ -75,20 +76,22 @@ export function LectureStudio() {
         setLoaded(true);
       },
     );
+  }, []);
 
-    // If this device already has an active sync key, pull whatever changed
-    // on other devices since last time and merge it in — shows local data
-    // immediately above (not gated on this) and refreshes once it lands.
-    const syncKey = getSyncKey();
-    if (syncKey) {
-      mergeAndSync(syncKey)
-        .then(() => {
-          refreshSessions();
-          refreshChecklistFeed();
-        })
-        .catch(() => {});
-    }
-  }, [refreshSessions, refreshChecklistFeed]);
+  // Runs whenever auth status resolves to "authenticated" — both right after
+  // a fresh Google sign-in and on a later visit where this device is still
+  // signed in — pulling whatever changed on other devices since last time
+  // and merging it in. Local data above isn't gated on this; the screen
+  // refreshes once the merge lands.
+  useEffect(() => {
+    if (authStatus !== "authenticated") return;
+    mergeAndSync()
+      .then(() => {
+        refreshSessions();
+        refreshChecklistFeed();
+      })
+      .catch(() => {});
+  }, [authStatus, refreshSessions, refreshChecklistFeed]);
 
   const categorySummaries = useMemo(() => {
     const map = new Map<string, { count: number; updatedAt: number }>();
