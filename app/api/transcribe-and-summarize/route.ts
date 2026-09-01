@@ -1,54 +1,55 @@
-import { NextResponse } from "next/server";
+import { NextResponse, after } from "next/server";
 import { del, get } from "@vercel/blob";
 import { ApiError, GoogleGenAI, Type, createPartFromBase64, createPartFromUri, createUserContent } from "@google/genai";
 import type { File as GenAiFile, Part } from "@google/genai";
+import { getRedisClient, isRedisConfigured } from "@/lib/redis";
 
-// Edge, not Node.js — a plain (non-streaming) Serverless Function response
-// on Vercel is held open until the whole handler returns, and once nothing
-// has been written back to the client for a while, Vercel's proxy — or the
-// browser's own fetch — treats the connection as dead and the client sees
-// "Failed to fetch" long before a 1h lecture's transcription actually
-// finishes. Edge Functions don't have that same idle-connection behavior,
-// and combined with the SSE response below (see POST), bytes keep flowing
-// to the client the whole time instead of going silent.
-// @google/genai resolves to its browser/fetch-based build outside Node
-// (see its package.json "exports"), which is what makes this swap safe.
-export const runtime = "edge";
-// Long lectures (2-3h) mean processing can run well past a few minutes.
-// 300s is Vercel Hobby's actual maximum for a Function's total duration
-// (confirmed against https://vercel.com/docs/functions/limitations, checked
-// 2026-08 — Hobby's default AND ceiling are both 300s; only Pro/Enterprise
-// can go higher, up to 800s or 1800s in extended-duration beta). There's no
+// Node.js, not Edge — this route now talks to Redis via ioredis (see
+// lib/redis.ts) for job tracking, and ioredis needs a real TCP socket
+// (node:net/tls), which Edge Runtime's isolate doesn't expose at all. The
+// earlier reason for Edge here — keeping a long SSE response streaming
+// without Vercel's proxy or the browser killing an idle connection — no
+// longer applies either: see the architecture note below.
+export const runtime = "nodejs";
+// Long lectures (2-3h) mean the background job (see after() in POST) can
+// run well past a few minutes. 300s is Vercel Hobby's actual maximum for a
+// Function's total duration on the Node.js runtime too (confirmed against
+// https://vercel.com/docs/functions/limitations, checked 2026-08 — Hobby's
+// default AND ceiling are both 300s regardless of runtime). There's no
 // larger number to put here on this plan — a plan upgrade is the only way
 // to raise this further for very long recordings.
 export const maxDuration = 300;
-// Separately, Vercel's docs note Edge Functions specifically "must begin
-// sending a response within 25 seconds to maintain streaming capabilities
-// beyond this period" — the periodic heartbeat below is tuned well under
-// that, and the very first byte is sent synchronously before any work
-// starts, so this route's time-to-first-byte is near-instant regardless of
-// how long the Gemini processing that follows takes.
 // This route never caches (always fresh Gemini work) — opt out of static
 // optimization explicitly rather than relying on Next's implicit dynamic
 // detection.
 export const dynamic = "force-dynamic";
 
-// This route no longer receives the raw audio/reference file bytes at all —
-// the client uploads those to Vercel Blob first (see lib/blobUpload.ts and
-// app/api/blob-upload/route.ts) and this route only receives small JSON
-// pointing at the uploaded blobs by URL. A direct browser -> Gemini upload
-// was tried first and rejected outright by Google's endpoint (no CORS
-// support), so Blob storage is the actual bridge: this route downloads each
-// blob itself (a server-to-server fetch, subject to neither browser CORS
-// nor Vercel's 4.5MB request-body cap) and forwards it on to Gemini's Files
-// API, deleting the transient blob once that hand-off is done. That's what
-// actually solves the Vercel body-size ceiling for a 50+ minute lecture
-// recording — the file's bytes never pass through this Function's own
-// request body, so the platform's 4.5MB cap and this Function's duration
-// budget are never in the same critical path as the multi-hundred-MB
-// upload. This route's own job — the blob download/re-upload plus the
-// actual STT/analysis calls — still needs the 300s budget above, since that
-// part is genuinely long-running (unrelated to payload size).
+// Architecture: async job queue, not a held-open request.
+//
+// Mobile browsers aggressively suspend a backgrounded tab's network
+// connections — switching away from the app mid-analysis (or the OS just
+// deciding to reclaim the tab) killed the in-flight request outright and
+// surfaced as "network error" client-side, no matter how well-behaved the
+// server's own response was (this app had already gone through an Edge +
+// SSE-streaming iteration specifically to dodge server/proxy-side idle-
+// connection kills — see git history — but that never addressed the client
+// connection itself being suspended, which is a different failure mode
+// streaming can't fix).
+//
+// So the request/response lifecycle here is now deliberately short:
+// POST creates a job, kicks off the real work via after() (Next.js's
+// primitive for continuing work past the point the response was sent —
+// Vercel implements it with waitUntil(), bounded by the same maxDuration
+// above), and returns just a jobId, fast. The client never holds a
+// connection open for the actual analysis at all — instead it polls GET
+// with that jobId (see lib/analysisJob.ts), and RecordingDetailView.tsx
+// persists the jobId to localStorage so a closed/backgrounded/reopened tab
+// can resume polling and safely pick up whatever Redis has, including a
+// result that finished while nobody was watching.
+//
+// Audio/reference files still never touch this Function's own request body
+// (see the Vercel Blob relay below) — that part of the architecture is
+// unchanged, just no longer entangled with the connection-liveness problem.
 
 type IncomingBookmark = {
   id: string;
@@ -80,6 +81,8 @@ type IncomingBlobRef = {
   mimeType?: unknown;
 };
 
+type BlobRef = { url: string; fileName: string; mimeType: string };
+
 type AnalyzeRequestBody = {
   audioBlob?: IncomingBlobRef;
   referenceBlobs?: unknown;
@@ -87,6 +90,22 @@ type AnalyzeRequestBody = {
   keywords?: unknown;
   slideThumbnails?: unknown;
 };
+
+type AnalysisResult = {
+  transcript: TranscriptSegment[];
+  fullText: string;
+  summary: string;
+  lectureNote: string;
+  checklist: ChecklistItem[];
+};
+
+// The shape stored in Redis under `job:{jobId}` — see writeJobRecord/
+// readJobRecord below. Deliberately just the three states asked for; no
+// finer-grained progress is tracked server-side.
+type JobRecord =
+  | { status: "processing"; createdAt: number }
+  | { status: "completed"; createdAt: number; result: AnalysisResult }
+  | { status: "error"; createdAt: number; error: string };
 
 const MODEL = "gemini-3.6-flash";
 // Mirrors ReferenceDocDropzone's own cap (components/ReferenceDocDropzone.tsx)
@@ -96,6 +115,10 @@ const MAX_REFERENCE_FILES = 5;
 // How long to wait for an uploaded file to finish Gemini-side processing
 // (ACTIVE) before giving up.
 const FILE_PROCESSING_TIMEOUT_MS = 5 * 60 * 1000;
+// How long a job record survives in Redis — generous enough that reopening
+// the app well after a background/close still finds the result, bounded so
+// stale jobs don't accumulate forever.
+const JOB_TTL_SECONDS = 24 * 60 * 60;
 
 const NO_SPEECH_TRANSCRIPT = "감지된 음성 내용이 없습니다.";
 const NO_SPEECH_SUMMARY = "오디오에서 명확한 강의 음성을 찾을 수 없습니다.";
@@ -202,7 +225,7 @@ function describeGeminiError(error: unknown): string {
   return `Gemini 분석 실패: ${message}`;
 }
 
-function parseBlobRef(raw: unknown): { url: string; fileName: string; mimeType: string } | null {
+function parseBlobRef(raw: unknown): BlobRef | null {
   if (!raw || typeof raw !== "object") return null;
   const ref = raw as IncomingBlobRef;
   const url = typeof ref.url === "string" ? ref.url : "";
@@ -212,20 +235,38 @@ function parseBlobRef(raw: unknown): { url: string; fileName: string; mimeType: 
   return { url, fileName, mimeType };
 }
 
+function jobKeyFor(jobId: string): string {
+  return `job:${jobId}`;
+}
+
+async function writeJobRecord(jobId: string, record: JobRecord): Promise<void> {
+  const redis = getRedisClient();
+  await redis?.set(jobKeyFor(jobId), JSON.stringify(record), "EX", JOB_TTL_SECONDS);
+}
+
+async function readJobRecord(jobId: string): Promise<JobRecord | null> {
+  const redis = getRedisClient();
+  const raw = await redis?.get(jobKeyFor(jobId));
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as JobRecord;
+  } catch {
+    return null;
+  }
+}
+
 const GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com";
 // Matches @google/genai's own chunk size for the same upload protocol.
 const UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
 
 // @google/genai's own `ai.files.upload()` sets a literal `Content-Length`
 // header on each upload chunk request (see its uploadBlobInternal) — a name
-// the Fetch spec lists as forbidden for scripts to set manually. Node's
-// fetch tolerates it, but Edge Runtime enforces the spec strictly and the
-// request fails outright with a bare "fetch failed", no matter the file
-// size (confirmed directly against this exact SDK call under `next dev`'s
-// edge sandbox). So file upload is hand-rolled here against the same public
-// resumable-upload REST protocol instead — every other Files/Models call
-// below still goes through the SDK as normal, since it's only this one
-// header on this one call that edge rejects.
+// the Fetch spec lists as forbidden for scripts to set manually. Node's own
+// fetch (undici) tolerates it in practice, but this hand-rolled version
+// (proven under both Edge and Node during earlier iterations of this route)
+// is kept as-is rather than reverted to the SDK call, since there's no
+// upside to touching working upload code while restructuring everything
+// else here.
 async function uploadFileToGemini(
   apiKey: string,
   file: Blob,
@@ -264,8 +305,7 @@ async function uploadFileToGemini(
         "X-Goog-Upload-Command": isFinalChunk ? "upload, finalize" : "upload",
         "X-Goog-Upload-Offset": String(offset),
       },
-      // No Content-Length header — fetch computes it from the Blob chunk
-      // itself, which is exactly what a spec-compliant edge fetch requires.
+      // No Content-Length header — fetch computes it from the Blob chunk itself.
       body: chunk,
     });
     if (!uploadResponse.ok) {
@@ -340,19 +380,14 @@ async function deleteUploadedFile(ai: GoogleGenAI, file: GenAiFile | null): Prom
 type RawSttResponse = { hasSpeech?: unknown; script?: unknown };
 type RawAnalysisResponse = { summary?: unknown; lectureNote?: unknown; checklist?: unknown };
 
-// Called with each raw text fragment Gemini streams back, from both workers
-// concurrently — the POST handler below forwards these straight through to
-// the client as SSE "chunk" events. Their content is never parsed on its own
-// (each fragment is an incomplete slice of one JSON document, not valid JSON
-// by itself); their only job is to keep bytes flowing so the connection
-// never goes idle long enough to look dead. The full JSON is only parsed
-// once each worker's stream ends, from the fully accumulated text.
-type ChunkListener = (worker: "stt" | "analysis", text: string) => void;
-
 // Worker A — STT only. Its entire maxOutputTokens budget goes toward the
 // verbatim transcript alone, so a long lecture no longer competes with the
-// lecture note for the same token ceiling.
-async function callSttWorker(ai: GoogleGenAI, uploadedAudio: GenAiFile, onChunk: ChunkListener): Promise<RawSttResponse> {
+// lecture note for the same token ceiling. Plain (non-streaming) calls now
+// that nothing is listening for incremental chunks — the background job has
+// no connection to keep alive, unlike the SSE-streaming version this route
+// used before moving to the job-queue architecture (see the file-level
+// comment above).
+async function callSttWorker(ai: GoogleGenAI, uploadedAudio: GenAiFile): Promise<RawSttResponse> {
   const systemInstruction = [
     "당신은 강의 녹음 오디오를 한 글자도 빠짐없이 받아쓰는 음성 인식(STT) 전문 어시스턴트입니다.",
     "반드시 지정된 JSON 스키마 형식으로만, 한국어로 응답하세요.",
@@ -379,7 +414,7 @@ async function callSttWorker(ai: GoogleGenAI, uploadedAudio: GenAiFile, onChunk:
     audioFile: { uri: uploadedAudio.uri, mimeType: uploadedAudio.mimeType, name: uploadedAudio.name },
   });
 
-  const stream = await ai.models.generateContentStream({
+  const response = await ai.models.generateContent({
     model: MODEL,
     contents: createUserContent([
       userPrompt,
@@ -393,22 +428,14 @@ async function callSttWorker(ai: GoogleGenAI, uploadedAudio: GenAiFile, onChunk:
     },
   });
 
-  let accumulated = "";
-  for await (const chunk of stream) {
-    if (chunk.promptFeedback?.blockReason) {
-      throw new Error("안전 정책으로 인해 이 요청을 처리할 수 없습니다. 다른 파일로 시도해주세요.");
-    }
-    if (chunk.text) {
-      accumulated += chunk.text;
-      onChunk("stt", chunk.text);
-    }
+  if (response.promptFeedback?.blockReason) {
+    throw new Error("안전 정책으로 인해 이 요청을 처리할 수 없습니다. 다른 파일로 시도해주세요.");
   }
-
-  if (!accumulated) {
+  if (!response.text) {
     throw new Error("AI로부터 스크립트 응답을 받지 못했습니다. 다시 시도해주세요.");
   }
   try {
-    return JSON.parse(accumulated);
+    return JSON.parse(response.text);
   } catch {
     throw new Error("스크립트 응답을 해석하는 데 실패했습니다. 다시 시도해주세요.");
   }
@@ -424,7 +451,6 @@ async function callAnalysisWorker(
   slideThumbnails: IncomingSlideThumbnail[],
   keywords: string[],
   bookmarkLines: string,
-  onChunk: ChunkListener,
 ): Promise<RawAnalysisResponse> {
   const hasReference = uploadedReferences.length > 0;
   const hasSlideImages = slideThumbnails.length > 0;
@@ -546,7 +572,7 @@ async function callAnalysisWorker(
     bookmarkCount: bookmarkLines ? bookmarkLines.split("\n").length : 0,
   });
 
-  const stream = await ai.models.generateContentStream({
+  const response = await ai.models.generateContent({
     model: MODEL,
     contents: createUserContent(contentParts),
     config: {
@@ -557,33 +583,157 @@ async function callAnalysisWorker(
     },
   });
 
-  let accumulated = "";
-  for await (const chunk of stream) {
-    if (chunk.promptFeedback?.blockReason) {
-      throw new Error("안전 정책으로 인해 이 요청을 처리할 수 없습니다. 다른 파일로 시도해주세요.");
-    }
-    if (chunk.text) {
-      accumulated += chunk.text;
-      onChunk("analysis", chunk.text);
-    }
+  if (response.promptFeedback?.blockReason) {
+    throw new Error("안전 정책으로 인해 이 요청을 처리할 수 없습니다. 다른 파일로 시도해주세요.");
   }
-
-  if (!accumulated) {
+  if (!response.text) {
     throw new Error("AI로부터 분석 응답을 받지 못했습니다. 다시 시도해주세요.");
   }
   try {
-    return JSON.parse(accumulated);
+    return JSON.parse(response.text);
   } catch {
     throw new Error("분석 응답을 해석하는 데 실패했습니다. 다시 시도해주세요.");
   }
 }
 
+// The actual work — download blobs, hand off to Gemini, run both workers,
+// assemble the final result. Runs inside after() (see POST), fully
+// decoupled from whatever the client's connection is doing by that point.
+async function runAnalysisJob(
+  apiKey: string,
+  audioBlobRef: BlobRef,
+  referenceBlobRefs: BlobRef[],
+  bookmarks: IncomingBookmark[],
+  keywords: string[],
+  slideThumbnails: IncomingSlideThumbnail[],
+): Promise<AnalysisResult> {
+  const ai = new GoogleGenAI({ apiKey });
+
+  let uploadedAudio: GenAiFile;
+  try {
+    console.log("[transcribe-and-summarize] downloading audio blob and uploading to Gemini", {
+      fileName: audioBlobRef.fileName,
+    });
+    uploadedAudio = await downloadAndUploadToGemini(
+      apiKey,
+      audioBlobRef.url,
+      audioBlobRef.fileName,
+      audioBlobRef.mimeType || "audio/webm",
+    );
+    uploadedAudio = await waitForFileActive(ai, uploadedAudio);
+  } catch (error) {
+    console.error("[transcribe-and-summarize] audio processing failed", { error });
+    throw new Error(`오디오 처리 실패: ${describeGeminiError(error)}`);
+  }
+
+  const uploadedReferences: GenAiFile[] = [];
+  for (const ref of referenceBlobRefs) {
+    try {
+      console.log("[transcribe-and-summarize] downloading reference blob and uploading to Gemini", {
+        fileName: ref.fileName,
+      });
+      let uploadedReference = await downloadAndUploadToGemini(
+        apiKey,
+        ref.url,
+        ref.fileName,
+        ref.mimeType || "application/pdf",
+      );
+      uploadedReference = await waitForFileActive(ai, uploadedReference);
+      uploadedReferences.push(uploadedReference);
+    } catch (error) {
+      console.error("[transcribe-and-summarize] reference processing failed", { error, fileName: ref.fileName });
+      await deleteUploadedFile(ai, uploadedAudio);
+      await Promise.all(uploadedReferences.map((file) => deleteUploadedFile(ai, file)));
+      throw new Error(`참고자료 '${ref.fileName}' 처리 실패: ${describeGeminiError(error)}`);
+    }
+  }
+
+  const bookmarkLines = bookmarks
+    .map((bookmark) => `- [${formatTimestamp(bookmark.atMs)}] ${bookmark.label}`)
+    .join("\n");
+
+  // Two independent Gemini calls in parallel — see callSttWorker/
+  // callAnalysisWorker above for why this replaced the old single combined
+  // call. Both reference the same already-uploaded audio file (no re-upload).
+  let sttResult: RawSttResponse;
+  let analysisResult: RawAnalysisResponse;
+  try {
+    [sttResult, analysisResult] = await Promise.all([
+      callSttWorker(ai, uploadedAudio),
+      callAnalysisWorker(ai, uploadedAudio, uploadedReferences, slideThumbnails, keywords, bookmarkLines),
+    ]);
+  } catch (error) {
+    console.error("[transcribe-and-summarize] Gemini call failed", {
+      model: MODEL,
+      status: error instanceof ApiError ? error.status : undefined,
+      error,
+    });
+    throw new Error(describeGeminiError(error));
+  } finally {
+    // Best-effort cleanup — Files API entries auto-expire after 48h anyway,
+    // so a failed delete here isn't worth surfacing to the user.
+    await deleteUploadedFile(ai, uploadedAudio);
+    await Promise.all(uploadedReferences.map((file) => deleteUploadedFile(ai, file)));
+  }
+
+  const rawSegments = Array.isArray(sttResult.script) ? sttResult.script : [];
+  // The STT worker is authoritative for hasSpeech — it's the one that
+  // actually listened through the whole file. If it found no speech, the
+  // analysis worker's output (which may have run against the reference PDF
+  // regardless) is discarded rather than risking fabricated notes.
+  const hasSpeech = sttResult.hasSpeech === true && rawSegments.length > 0;
+
+  if (!hasSpeech) {
+    return {
+      transcript: [{ id: "seg-0", startMs: 0, endMs: 0, text: NO_SPEECH_TRANSCRIPT }],
+      fullText: NO_SPEECH_TRANSCRIPT,
+      summary: NO_SPEECH_SUMMARY,
+      lectureNote: NO_SPEECH_NOTE,
+      checklist: [],
+    };
+  }
+
+  const transcript: TranscriptSegment[] = rawSegments.map((segment, index) => {
+    const s = segment as { startSeconds?: unknown; endSeconds?: unknown; text?: unknown };
+    return {
+      id: `seg-${index}`,
+      startMs: Math.round(Number(s.startSeconds ?? 0) * 1000),
+      endMs: Math.round(Number(s.endSeconds ?? 0) * 1000),
+      text: typeof s.text === "string" ? fixEscapedNewlines(s.text.trim()) : "",
+    };
+  });
+
+  const fullText = transcript.map((segment) => segment.text).join(" ").trim();
+  const summary = typeof analysisResult.summary === "string" ? fixEscapedNewlines(analysisResult.summary.trim()) : "";
+  const lectureNote =
+    typeof analysisResult.lectureNote === "string" ? fixEscapedNewlines(analysisResult.lectureNote.trim()) : "";
+  const checklistTexts = Array.isArray(analysisResult.checklist)
+    ? analysisResult.checklist.filter((item): item is string => typeof item === "string")
+    : [];
+  const checklist: ChecklistItem[] = checklistTexts.map((text, index) => ({
+    id: `check-${index}`,
+    text: fixEscapedNewlines(text),
+    done: false,
+  }));
+
+  return { transcript, fullText, summary, lectureNote, checklist };
+}
+
+// Kicks off a job and returns its id immediately — see the file-level
+// architecture comment above.
 export async function POST(request: Request) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     return NextResponse.json(
       { error: "서버에 GEMINI_API_KEY가 설정되어 있지 않습니다. .env.local을 확인해주세요." },
       { status: 500 },
+    );
+  }
+
+  if (!isRedisConfigured()) {
+    return NextResponse.json(
+      { error: "Redis 스토리지가 연결되어 있지 않습니다. Vercel 프로젝트에 Redis 통합을 연결한 뒤 다시 시도해주세요." },
+      { status: 503 },
     );
   }
 
@@ -595,8 +745,8 @@ export async function POST(request: Request) {
   }
 
   // The audio must already be uploaded to Vercel Blob by the client
-  // (lib/blobUpload.ts) before this route is ever called — see the file-
-  // level comment above for why. Only its blob reference arrives here.
+  // (lib/blobUpload.ts) before this route is ever called. Only its blob
+  // reference arrives here.
   const audioBlobRef = parseBlobRef(body.audioBlob);
   if (!audioBlobRef) {
     return NextResponse.json(
@@ -616,193 +766,59 @@ export async function POST(request: Request) {
     .map(parseBlobRef)
     .filter((ref): ref is NonNullable<ReturnType<typeof parseBlobRef>> => ref !== null);
 
-  let bookmarks: IncomingBookmark[] = [];
-  if (Array.isArray(body.bookmarks)) {
-    bookmarks = body.bookmarks;
-  }
+  const bookmarks: IncomingBookmark[] = Array.isArray(body.bookmarks) ? body.bookmarks : [];
+  const keywords: string[] = Array.isArray(body.keywords)
+    ? body.keywords.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  const slideThumbnails: IncomingSlideThumbnail[] = Array.isArray(body.slideThumbnails)
+    ? body.slideThumbnails.filter(
+        (item): item is IncomingSlideThumbnail =>
+          item && typeof item.page === "number" && typeof item.dataUrl === "string",
+      )
+    : [];
 
-  let keywords: string[] = [];
-  if (Array.isArray(body.keywords)) {
-    keywords = body.keywords.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
-  }
+  const jobId = crypto.randomUUID();
+  await writeJobRecord(jobId, { status: "processing", createdAt: Date.now() });
 
-  let slideThumbnails: IncomingSlideThumbnail[] = [];
-  if (Array.isArray(body.slideThumbnails)) {
-    slideThumbnails = body.slideThumbnails.filter(
-      (item): item is IncomingSlideThumbnail =>
-        item && typeof item.page === "number" && typeof item.dataUrl === "string",
+  after(async () => {
+    try {
+      const result = await runAnalysisJob(apiKey, audioBlobRef, referenceBlobRefs, bookmarks, keywords, slideThumbnails);
+      await writeJobRecord(jobId, { status: "completed", createdAt: Date.now(), result });
+    } catch (error) {
+      console.error("[transcribe-and-summarize] job failed", { jobId, error });
+      await writeJobRecord(jobId, {
+        status: "error",
+        createdAt: Date.now(),
+        error: error instanceof Error ? error.message : "AI 분석에 실패했습니다.",
+      });
+    }
+  });
+
+  return NextResponse.json({ jobId });
+}
+
+// Polling endpoint — see lib/analysisJob.ts on the client side.
+export async function GET(request: Request) {
+  if (!isRedisConfigured()) {
+    return NextResponse.json(
+      { error: "Redis 스토리지가 연결되어 있지 않습니다. Vercel 프로젝트에 Redis 통합을 연결한 뒤 다시 시도해주세요." },
+      { status: 503 },
     );
   }
 
-  const ai = new GoogleGenAI({ apiKey });
+  const url = new URL(request.url);
+  const jobId = url.searchParams.get("jobId");
+  if (!jobId) {
+    return NextResponse.json({ error: "jobId가 전달되지 않았습니다." }, { status: 400 });
+  }
 
-  // Everything from here on can run long enough (Gemini generation for a 1h+
-  // lecture) to sit through Vercel's idle-connection cutoff if sent back as
-  // one plain JSON response — so instead this streams Server-Sent Events the
-  // whole way: "chunk" events (raw Gemini stream fragments, forwarded purely
-  // to keep bytes flowing — never meaningful on their own) and a final
-  // "done" event carrying the exact same JSON payload this route used to
-  // return directly. See ChunkListener above and the runtime/edge comment
-  // below.
-  const encoder = new TextEncoder();
+  const record = await readJobRecord(jobId);
+  if (!record) {
+    return NextResponse.json(
+      { error: "작업을 찾을 수 없습니다. 만료되었거나 존재하지 않는 작업입니다." },
+      { status: 404 },
+    );
+  }
 
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      let closed = false;
-      function send(event: string, data: unknown) {
-        if (closed) return;
-        controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
-      }
-      function sendChunk(worker: "stt" | "analysis", text: string) {
-        send("chunk", { worker, text });
-      }
-
-      // Sent synchronously, before any Gemini work begins — Vercel's Edge
-      // runtime requires a Function to begin sending its response within
-      // 25s to keep streaming past that point, so time-to-first-byte here
-      // is made near-zero rather than leaving it to chance.
-      controller.enqueue(encoder.encode(`: stream-start\n\n`));
-
-      // Covers the file-processing wait before either worker's own stream
-      // has produced its first chunk — otherwise a large file's Gemini-side
-      // processing time alone could leave the connection silent long enough
-      // to look dead. Well under the 25s edge threshold above for
-      // comfortable margin even if one tick is delayed.
-      const heartbeat = setInterval(() => {
-        if (closed) return;
-        controller.enqueue(encoder.encode(`: keepalive\n\n`));
-      }, 8000);
-
-      try {
-        let uploadedAudio: GenAiFile;
-        try {
-          console.log("[transcribe-and-summarize] downloading audio blob and uploading to Gemini", {
-            fileName: audioBlobRef.fileName,
-          });
-          uploadedAudio = await downloadAndUploadToGemini(
-            apiKey,
-            audioBlobRef.url,
-            audioBlobRef.fileName,
-            audioBlobRef.mimeType || "audio/webm",
-          );
-          uploadedAudio = await waitForFileActive(ai, uploadedAudio);
-        } catch (error) {
-          console.error("[transcribe-and-summarize] audio processing failed", { error });
-          throw new Error(`오디오 처리 실패: ${describeGeminiError(error)}`);
-        }
-
-        const uploadedReferences: GenAiFile[] = [];
-        for (const ref of referenceBlobRefs) {
-          try {
-            console.log("[transcribe-and-summarize] downloading reference blob and uploading to Gemini", {
-              fileName: ref.fileName,
-            });
-            let uploadedReference = await downloadAndUploadToGemini(
-              apiKey,
-              ref.url,
-              ref.fileName,
-              ref.mimeType || "application/pdf",
-            );
-            uploadedReference = await waitForFileActive(ai, uploadedReference);
-            uploadedReferences.push(uploadedReference);
-          } catch (error) {
-            console.error("[transcribe-and-summarize] reference processing failed", { error, fileName: ref.fileName });
-            await deleteUploadedFile(ai, uploadedAudio);
-            await Promise.all(uploadedReferences.map((file) => deleteUploadedFile(ai, file)));
-            throw new Error(`참고자료 '${ref.fileName}' 처리 실패: ${describeGeminiError(error)}`);
-          }
-        }
-
-        const bookmarkLines = bookmarks
-          .map((bookmark) => `- [${formatTimestamp(bookmark.atMs)}] ${bookmark.label}`)
-          .join("\n");
-
-        // Two independent Gemini calls in parallel — see callSttWorker/
-        // callAnalysisWorker above for why this replaced the old single
-        // combined call. Both reference the same already-uploaded audio
-        // file (no re-upload), and both now stream their own output back
-        // as "chunk" events via sendChunk as soon as the first one starts
-        // producing tokens, well before the heartbeat above would fire again.
-        let sttResult: RawSttResponse;
-        let analysisResult: RawAnalysisResponse;
-        try {
-          [sttResult, analysisResult] = await Promise.all([
-            callSttWorker(ai, uploadedAudio, sendChunk),
-            callAnalysisWorker(ai, uploadedAudio, uploadedReferences, slideThumbnails, keywords, bookmarkLines, sendChunk),
-          ]);
-        } catch (error) {
-          console.error("[transcribe-and-summarize] Gemini call failed", {
-            model: MODEL,
-            status: error instanceof ApiError ? error.status : undefined,
-            error,
-          });
-          throw new Error(describeGeminiError(error));
-        } finally {
-          // Best-effort cleanup — Files API entries auto-expire after 48h
-          // anyway, so a failed delete here isn't worth surfacing to the user.
-          await deleteUploadedFile(ai, uploadedAudio);
-          await Promise.all(uploadedReferences.map((file) => deleteUploadedFile(ai, file)));
-        }
-
-        const rawSegments = Array.isArray(sttResult.script) ? sttResult.script : [];
-        // The STT worker is authoritative for hasSpeech — it's the one that
-        // actually listened through the whole file. If it found no speech,
-        // the analysis worker's output (which may have run against the
-        // reference PDF regardless) is discarded rather than risking
-        // fabricated notes.
-        const hasSpeech = sttResult.hasSpeech === true && rawSegments.length > 0;
-
-        if (!hasSpeech) {
-          send("done", {
-            transcript: [{ id: "seg-0", startMs: 0, endMs: 0, text: NO_SPEECH_TRANSCRIPT }],
-            fullText: NO_SPEECH_TRANSCRIPT,
-            summary: NO_SPEECH_SUMMARY,
-            lectureNote: NO_SPEECH_NOTE,
-            checklist: [],
-          });
-          return;
-        }
-
-        const transcript: TranscriptSegment[] = rawSegments.map((segment, index) => {
-          const s = segment as { startSeconds?: unknown; endSeconds?: unknown; text?: unknown };
-          return {
-            id: `seg-${index}`,
-            startMs: Math.round(Number(s.startSeconds ?? 0) * 1000),
-            endMs: Math.round(Number(s.endSeconds ?? 0) * 1000),
-            text: typeof s.text === "string" ? fixEscapedNewlines(s.text.trim()) : "",
-          };
-        });
-
-        const fullText = transcript.map((segment) => segment.text).join(" ").trim();
-        const summary =
-          typeof analysisResult.summary === "string" ? fixEscapedNewlines(analysisResult.summary.trim()) : "";
-        const lectureNote =
-          typeof analysisResult.lectureNote === "string" ? fixEscapedNewlines(analysisResult.lectureNote.trim()) : "";
-        const checklistTexts = Array.isArray(analysisResult.checklist)
-          ? analysisResult.checklist.filter((item): item is string => typeof item === "string")
-          : [];
-        const checklist: ChecklistItem[] = checklistTexts.map((text, index) => ({
-          id: `check-${index}`,
-          text: fixEscapedNewlines(text),
-          done: false,
-        }));
-
-        send("done", { transcript, fullText, summary, lectureNote, checklist });
-      } catch (error) {
-        send("error", { error: error instanceof Error ? error.message : "AI 분석에 실패했습니다." });
-      } finally {
-        clearInterval(heartbeat);
-        closed = true;
-        controller.close();
-      }
-    },
-  });
-
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
-    },
-  });
+  return NextResponse.json(record);
 }

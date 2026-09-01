@@ -9,13 +9,13 @@ import { KeywordTagInput } from "@/components/KeywordTagInput";
 import { ReattachAudioPrompt } from "@/components/ReattachAudioPrompt";
 import { ReferenceDocDropzone } from "@/components/ReferenceDocDropzone";
 import { ReviewPanel } from "@/components/ReviewPanel";
+import { clearStoredJobId, getStoredJobId, pollJobUntilDone, setStoredJobId, startAnalysisJob } from "@/lib/analysisJob";
 import { probeAudioDurationMs } from "@/lib/audio";
 import { loadSessionById, loadSlideImages, saveSession, saveSlideImages } from "@/lib/db";
 import { formatDateTime, formatFileSize } from "@/lib/format";
 import type { UploadedBlobRef } from "@/lib/blobUpload";
 import { uploadFileToBlob } from "@/lib/blobUpload";
 import { buildSlideThumbnails, extractPdfSlides } from "@/lib/pdfSlides";
-import { readSseStream } from "@/lib/sse";
 import { extractChangedTerms, replaceAllOccurrences } from "@/lib/termDiff";
 import type {
   AiResult,
@@ -279,24 +279,57 @@ export function RecordingDetailView({
     void el.play();
   }, []);
 
+  // Picks up an already-started job by id — used both right after
+  // handleAnalyze kicks one off and, on mount, to resume one that was still
+  // running when this session was last closed or backgrounded (see the
+  // recovery effect below). Polling is stateless from this component's
+  // point of view: every tick just asks Redis for the job's current status,
+  // so it behaves identically whether it's been watching the whole time or
+  // just started checking in after the job already finished.
+  const resumeJobPolling = useCallback(
+    async (jobId: string) => {
+      setIsAnalyzing(true);
+      setAnalyzeError(null);
+      let stageIndex = 0;
+      setAnalyzeProgress(PROGRESS_STAGES[0]);
+      try {
+        const result = await pollJobUntilDone(jobId, () => {
+          stageIndex = Math.min(stageIndex + 1, PROGRESS_STAGES.length - 1);
+          setAnalyzeProgress(PROGRESS_STAGES[stageIndex]);
+        });
+        clearStoredJobId(sessionId);
+        setAiResult({
+          transcript: result.transcript ?? [],
+          fullText: result.fullText ?? "",
+          summary: result.summary ?? "",
+          lectureNote: result.lectureNote ?? "",
+          checklist: result.checklist ?? [],
+        });
+      } catch (error) {
+        clearStoredJobId(sessionId);
+        setAnalyzeError(error instanceof Error ? error.message : "분석 중 알 수 없는 오류가 발생했습니다.");
+      } finally {
+        setIsAnalyzing(false);
+        setAnalyzeProgress("");
+      }
+    },
+    [sessionId],
+  );
+
   async function handleAnalyze() {
     if (!localAudio?.blob || isAnalyzing) return;
 
     setIsAnalyzing(true);
     setAnalyzeError(null);
 
-    let stageTimer: number | null = null;
-
     try {
       // Audio (and any reference docs) upload straight from this browser to
       // Vercel Blob storage — never through our own backend — which is what
-      // actually avoids Vercel's 4.5MB request-body cap and Function
-      // duration budget for a 50+ minute recording (a direct browser upload
-      // to Gemini's own Files API was tried first and rejected outright by
-      // Google's endpoint — no CORS support). Only the resulting blob
-      // references (small JSON) get sent to /api/transcribe-and-summarize
-      // below, which downloads them server-side and forwards them to Gemini
-      // from there. See lib/blobUpload.ts.
+      // actually avoids Vercel's 4.5MB request-body cap for a 50+ minute
+      // recording (a direct browser upload to Gemini's own Files API was
+      // tried first and rejected outright by Google's endpoint — no CORS
+      // support). Only the resulting blob references (small JSON) get sent
+      // to /api/transcribe-and-summarize below. See lib/blobUpload.ts.
       setAnalyzeProgress("오디오 업로드 중...");
       const audioBlob = await uploadFileToBlob(
         localAudio.blob,
@@ -317,75 +350,41 @@ export function RecordingDetailView({
 
       const slideThumbnails = slideImages.length > 0 ? await buildSlideThumbnails(slideImages) : [];
 
-      setAnalyzeProgress(PROGRESS_STAGES[0]);
-      stageTimer = window.setInterval(() => {
-        setAnalyzeProgress((current) => {
-          const index = PROGRESS_STAGES.indexOf(current);
-          const next = PROGRESS_STAGES[Math.min(index + 1, PROGRESS_STAGES.length - 1)];
-          return next;
-        });
-      }, 4000);
+      // From here the actual analysis is an async job on the server (see
+      // app/api/transcribe-and-summarize/route.ts) — this request just
+      // starts it and gets back a jobId immediately. The app never holds a
+      // connection open for the several-minute Gemini run itself, which is
+      // what makes this safe against a mobile browser backgrounding or
+      // reclaiming the tab mid-analysis (the previous SSE-streaming
+      // approach was still vulnerable to that: the client connection itself
+      // gets suspended by the OS, independent of anything the server does).
+      setAnalyzeProgress("서버 분석 요청 중...");
+      const jobId = await startAnalysisJob({ audioBlob, referenceBlobs, bookmarks, keywords, slideThumbnails });
+      // Persisted before polling starts, not after — if the tab gets
+      // backgrounded or closed between these two lines, the job is still
+      // recoverable on next open (see the mount effect below).
+      setStoredJobId(sessionId, jobId);
 
-      const response = await fetch("/api/transcribe-and-summarize", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ audioBlob, referenceBlobs, bookmarks, keywords, slideThumbnails }),
-      });
-
-      // Fast-fail validation (missing file reference, missing server API
-      // key) never reaches the SSE stream below — the route returns a plain
-      // JSON error for those instead of starting to stream. See
-      // app/api/transcribe-and-summarize/route.ts.
-      if (!response.ok) {
-        const errorBody = await response.json().catch(() => null);
-        throw new Error(errorBody?.error ?? "분석에 실패했습니다.");
-      }
-      if (!response.body) {
-        throw new Error("서버 응답을 스트리밍으로 받지 못했습니다. 다시 시도해주세요.");
-      }
-
-      // The server streams SSE events the entire time it's transcribing (see
-      // route.ts) purely to keep the connection alive during a long (1h+)
-      // lecture — intermediate "chunk" events carry incomplete JSON
-      // fragments and are only useful as that keepalive signal, so they're
-      // discarded here. Only once the terminal "done" event arrives is
-      // there a complete result to parse.
-      let data: {
-        transcript?: TranscriptSegment[];
-        fullText?: string;
-        summary?: string;
-        lectureNote?: string;
-        checklist?: ChecklistItem[];
-      } | null = null;
-
-      for await (const { event, data: payload } of readSseStream(response.body)) {
-        if (event === "done") {
-          data = JSON.parse(payload);
-        } else if (event === "error") {
-          throw new Error((JSON.parse(payload) as { error?: string }).error ?? "분석에 실패했습니다.");
-        }
-      }
-
-      if (!data) {
-        throw new Error("분석 응답을 받지 못했습니다. 다시 시도해주세요.");
-      }
-
-      const checklist: ChecklistItem[] = data.checklist ?? [];
-      setAiResult({
-        transcript: data.transcript ?? [],
-        fullText: data.fullText ?? "",
-        summary: data.summary ?? "",
-        lectureNote: data.lectureNote ?? "",
-        checklist,
-      });
+      await resumeJobPolling(jobId);
     } catch (error) {
       setAnalyzeError(error instanceof Error ? error.message : "분석 중 알 수 없는 오류가 발생했습니다.");
-    } finally {
-      if (stageTimer !== null) window.clearInterval(stageTimer);
       setIsAnalyzing(false);
       setAnalyzeProgress("");
     }
   }
+
+  // Recovery: if this session has a job id left over in localStorage (set
+  // by handleAnalyze above, cleared once resumeJobPolling reaches a
+  // terminal state), resume polling for it on mount — this is what lets a
+  // closed or backgrounded tab come back, reopen this session, and safely
+  // pick up either the still-processing job or a result that finished while
+  // nobody was watching, straight from Redis.
+  useEffect(() => {
+    if (!hydrated || notFound || aiResult) return;
+    const jobId = getStoredJobId(sessionId);
+    if (!jobId) return;
+    resumeJobPolling(jobId);
+  }, [hydrated, notFound, aiResult, sessionId, resumeJobPolling]);
 
   const updateChecklist = useCallback((nextChecklist: ChecklistItem[]) => {
     setAiResult((current) => (current ? { ...current, checklist: nextChecklist } : current));
