@@ -14,9 +14,19 @@ import type { File as GenAiFile, Part } from "@google/genai";
 // (see its package.json "exports"), which is what makes this swap safe.
 export const runtime = "edge";
 // Long lectures (2-3h) mean upload + processing can run well past a few
-// minutes. Capped at 300s to match Vercel Hobby's plan ceiling — a hosting
-// upgrade would allow raising this again for very long recordings.
+// minutes. 300s is Vercel Hobby's actual maximum for a Function's total
+// duration (confirmed against https://vercel.com/docs/functions/limitations,
+// checked 2026-08 — Hobby's default AND ceiling are both 300s; only Pro/
+// Enterprise can go higher, up to 800s or 1800s in extended-duration beta).
+// There's no larger number to put here on this plan — a plan upgrade is the
+// only way to raise this further for very long recordings.
 export const maxDuration = 300;
+// Separately, Vercel's docs note Edge Functions specifically "must begin
+// sending a response within 25 seconds to maintain streaming capabilities
+// beyond this period" — the periodic heartbeat below is tuned well under
+// that, and the very first byte is sent synchronously before any upload
+// work starts, so this route's time-to-first-byte is near-instant
+// regardless of how long the Gemini upload/processing that follows takes.
 // This route always reads a fresh multipart upload (request.formData()) and
 // calls out to Gemini — never cacheable, so opt out of static optimization
 // explicitly rather than relying on Next's implicit dynamic detection.
@@ -50,7 +60,13 @@ const MODEL = "gemini-3.6-flash";
 // Files are uploaded via the Gemini Files API (not inline base64), which
 // supports up to 2GB per file — so these caps are just sane upper bounds for
 // a lecture recording (2-3h of Opus audio) and a reference document, not a
-// workaround for Gemini's much smaller ~20MB inline-data limit.
+// workaround for Gemini's much smaller ~20MB inline-data limit. Both are
+// already far above the 20MB floor multi-file/audio uploads need — there is
+// no separate Next.js "bodyParser sizeLimit" to raise here (that config only
+// exists for Pages Router API routes; this is an App Router Route Handler,
+// which has no such Next.js-level cap — see next.config.ts for the one real
+// platform-level constraint that does still apply, Vercel's 4.5MB request
+// body limit).
 const MAX_AUDIO_BYTES = 300 * 1024 * 1024; // 300MB
 const MAX_REFERENCE_BYTES = 50 * 1024 * 1024; // 50MB, per file
 // Mirrors ReferenceDocDropzone's own cap (components/ReferenceDocDropzone.tsx)
@@ -634,14 +650,21 @@ export async function POST(request: Request) {
         send("chunk", { worker, text });
       }
 
+      // Sent synchronously, before any upload/Gemini work begins — Vercel's
+      // Edge runtime requires a Function to begin sending its response
+      // within 25s to keep streaming past that point, so time-to-first-byte
+      // here is made near-zero rather than leaving it to chance.
+      controller.enqueue(encoder.encode(`: stream-start\n\n`));
+
       // Covers the upload + Gemini-side file-processing wait, before either
       // worker's own stream has produced its first chunk — otherwise a large
       // file's upload/processing time alone could leave the connection
-      // silent long enough to look dead.
+      // silent long enough to look dead. Well under the 25s edge threshold
+      // above for comfortable margin even if one tick is delayed.
       const heartbeat = setInterval(() => {
         if (closed) return;
         controller.enqueue(encoder.encode(`: keepalive\n\n`));
-      }, 15000);
+      }, 8000);
 
       try {
         // Large lecture recordings (2-3h) and reference docs go through the
