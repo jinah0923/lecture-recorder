@@ -16,6 +16,7 @@ import { formatDateTime, formatFileSize } from "@/lib/format";
 import type { UploadedBlobRef } from "@/lib/blobUpload";
 import { uploadFileToBlob } from "@/lib/blobUpload";
 import { buildSlideThumbnails, extractPdfSlides } from "@/lib/pdfSlides";
+import { pushLocalSessions } from "@/lib/sync";
 import { extractChangedTerms, replaceAllOccurrences } from "@/lib/termDiff";
 import type {
   AiResult,
@@ -136,16 +137,12 @@ export function RecordingDetailView({
     };
   }, [sessionId]);
 
-  // Persist metadata edits — never the audio blob, preserving createdAt.
-  // Debounced so rapid edits (e.g. typing in the title) don't trigger an
-  // IndexedDB write on every keystroke; saves once input settles. On unmount
-  // (e.g. navigating away before the debounce fires), flush immediately
-  // instead of dropping the pending edit.
-  const pendingSaveRef = useRef<LectureSession | null>(null);
-
-  useEffect(() => {
-    if (!hydrated || notFound) return;
-    const session: LectureSession = {
+  // Shared by the debounced autosave below and by resumeJobPolling (which
+  // needs to persist a job's result immediately, not debounced) — both just
+  // want "the current session, optionally with some fields overridden"
+  // without duplicating this field list in two places.
+  const buildSessionSnapshot = useCallback(
+    (overrides?: Partial<LectureSession>): LectureSession => ({
       id: sessionId,
       createdAt,
       updatedAt: Date.now(),
@@ -158,29 +155,40 @@ export function RecordingDetailView({
       keywords,
       referenceFileNames,
       aiResult,
-    };
+      ...overrides,
+    }),
+    [
+      sessionId,
+      createdAt,
+      category,
+      title,
+      durationMs,
+      audioFileName,
+      audioMimeType,
+      bookmarks,
+      keywords,
+      referenceFileNames,
+      aiResult,
+    ],
+  );
+
+  // Persist metadata edits — never the audio blob, preserving createdAt.
+  // Debounced so rapid edits (e.g. typing in the title) don't trigger an
+  // IndexedDB write on every keystroke; saves once input settles. On unmount
+  // (e.g. navigating away before the debounce fires), flush immediately
+  // instead of dropping the pending edit.
+  const pendingSaveRef = useRef<LectureSession | null>(null);
+
+  useEffect(() => {
+    if (!hydrated || notFound) return;
+    const session = buildSessionSnapshot();
     pendingSaveRef.current = session;
     const timer = window.setTimeout(() => {
       pendingSaveRef.current = null;
       saveSession(session).then(onSessionSaved).catch(() => {});
     }, AUTOSAVE_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
-  }, [
-    hydrated,
-    notFound,
-    sessionId,
-    createdAt,
-    category,
-    title,
-    durationMs,
-    audioFileName,
-    audioMimeType,
-    bookmarks,
-    keywords,
-    referenceFileNames,
-    aiResult,
-    onSessionSaved,
-  ]);
+  }, [hydrated, notFound, buildSessionSnapshot, onSessionSaved]);
 
   useEffect(() => {
     return () => {
@@ -279,6 +287,13 @@ export function RecordingDetailView({
     void el.play();
   }, []);
 
+  // Guards against resumeJobPolling starting a second, concurrent poll loop
+  // for the same job — its identity changes whenever the session snapshot
+  // it closes over does (title edits, bookmark changes, etc. — see
+  // buildSessionSnapshot), which would otherwise re-trigger the mount
+  // recovery effect below mid-poll.
+  const isPollingRef = useRef(false);
+
   // Picks up an already-started job by id — used both right after
   // handleAnalyze kicks one off and, on mount, to resume one that was still
   // running when this session was last closed or backgrounded (see the
@@ -288,6 +303,8 @@ export function RecordingDetailView({
   // just started checking in after the job already finished.
   const resumeJobPolling = useCallback(
     async (jobId: string) => {
+      if (isPollingRef.current) return;
+      isPollingRef.current = true;
       setIsAnalyzing(true);
       setAnalyzeError(null);
       let stageIndex = 0;
@@ -298,22 +315,38 @@ export function RecordingDetailView({
           setAnalyzeProgress(PROGRESS_STAGES[stageIndex]);
         });
         clearStoredJobId(sessionId);
-        setAiResult({
+        const nextAiResult: AiResult = {
           transcript: result.transcript ?? [],
           fullText: result.fullText ?? "",
           summary: result.summary ?? "",
           lectureNote: result.lectureNote ?? "",
           checklist: result.checklist ?? [],
-        });
+        };
+        setAiResult(nextAiResult);
+
+        // Saved immediately here rather than left to the debounced autosave
+        // effect above — that effect only fires ~300ms after this render
+        // commits, and if the user navigates away in that window the
+        // pending write flushes to IndexedDB on unmount but never reaches
+        // the cloud. A job finishing is exactly the moment the result needs
+        // to be durable and synced, not just eventually so.
+        const session = buildSessionSnapshot({ aiResult: nextAiResult });
+        await saveSession(session);
+        onSessionSaved();
+        // Explicit, not just piggybacked on the parent's own refreshAll()
+        // — fails silently when signed out, since cloud sync is opt-in via
+        // Google login (see lib/sync.ts); a real push when signed in.
+        await pushLocalSessions().catch(() => {});
       } catch (error) {
         clearStoredJobId(sessionId);
         setAnalyzeError(error instanceof Error ? error.message : "분석 중 알 수 없는 오류가 발생했습니다.");
       } finally {
+        isPollingRef.current = false;
         setIsAnalyzing(false);
         setAnalyzeProgress("");
       }
     },
-    [sessionId],
+    [sessionId, buildSessionSnapshot, onSessionSaved],
   );
 
   async function handleAnalyze() {
@@ -512,6 +545,25 @@ export function RecordingDetailView({
         )}
       </div>
 
+      {/* Completed results take priority over everything below — shown as
+          soon as aiResult exists, regardless of whether this device's audio
+          blob (or even a sync from another device) has caught up yet. A
+          session analyzed on one device and opened on another before its
+          audio is ever re-attached here should still show its summary
+          immediately, not hide it behind an audio-reattach prompt. */}
+      {aiResult && (
+        <ReviewPanel
+          title={title || "제목 없는 강의"}
+          aiResult={aiResult}
+          onSeek={seekTo}
+          onUpdateChecklist={updateChecklist}
+          onUpdateLectureNote={updateLectureNote}
+          onUpdateTranscript={updateTranscript}
+          onSegmentCommitted={handleSegmentCommitted}
+          slideImages={slideImagesMap}
+        />
+      )}
+
       {audioUrl && localAudio ? (
         <AudioPlayer
           audioUrl={audioUrl}
@@ -607,19 +659,6 @@ export function RecordingDetailView({
           emptyText="저장된 북마크 없음"
         />
       </section>
-
-      {aiResult && (
-        <ReviewPanel
-          title={title || "제목 없는 강의"}
-          aiResult={aiResult}
-          onSeek={seekTo}
-          onUpdateChecklist={updateChecklist}
-          onUpdateLectureNote={updateLectureNote}
-          onUpdateTranscript={updateTranscript}
-          onSegmentCommitted={handleSegmentCommitted}
-          slideImages={slideImagesMap}
-        />
-      )}
 
       {syncToast && (
         <div className="fixed right-4 top-16 z-50 max-w-sm rounded-xl bg-zinc-900 px-4 py-3 text-sm text-white shadow-lg dark:bg-zinc-800">
