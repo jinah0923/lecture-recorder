@@ -12,6 +12,8 @@ import { ReviewPanel } from "@/components/ReviewPanel";
 import { probeAudioDurationMs } from "@/lib/audio";
 import { loadSessionById, loadSlideImages, saveSession, saveSlideImages } from "@/lib/db";
 import { formatDateTime, formatFileSize } from "@/lib/format";
+import type { UploadedBlobRef } from "@/lib/blobUpload";
+import { uploadFileToBlob } from "@/lib/blobUpload";
 import { buildSlideThumbnails, extractPdfSlides } from "@/lib/pdfSlides";
 import { readSseStream } from "@/lib/sse";
 import { extractChangedTerms, replaceAllOccurrences } from "@/lib/termDiff";
@@ -282,45 +284,57 @@ export function RecordingDetailView({
 
     setIsAnalyzing(true);
     setAnalyzeError(null);
-    setAnalyzeProgress(PROGRESS_STAGES[0]);
 
-    const stageTimer = window.setInterval(() => {
-      setAnalyzeProgress((current) => {
-        const index = PROGRESS_STAGES.indexOf(current);
-        const next = PROGRESS_STAGES[Math.min(index + 1, PROGRESS_STAGES.length - 1)];
-        return next;
-      });
-    }, 4000);
+    let stageTimer: number | null = null;
 
     try {
-      const formData = new FormData();
-      formData.append("audio", localAudio.blob, localAudio.name || "audio");
-      formData.append("bookmarks", JSON.stringify(bookmarks));
-      if (keywords.length > 0) {
-        formData.append("keywords", JSON.stringify(keywords));
+      // Audio (and any reference docs) upload straight from this browser to
+      // Vercel Blob storage — never through our own backend — which is what
+      // actually avoids Vercel's 4.5MB request-body cap and Function
+      // duration budget for a 50+ minute recording (a direct browser upload
+      // to Gemini's own Files API was tried first and rejected outright by
+      // Google's endpoint — no CORS support). Only the resulting blob
+      // references (small JSON) get sent to /api/transcribe-and-summarize
+      // below, which downloads them server-side and forwards them to Gemini
+      // from there. See lib/blobUpload.ts.
+      setAnalyzeProgress("오디오 업로드 중...");
+      const audioBlob = await uploadFileToBlob(
+        localAudio.blob,
+        localAudio.name || "audio",
+        localAudio.mimeType || "audio/webm",
+        (fraction) => setAnalyzeProgress(`오디오 업로드 중... (${Math.round(fraction * 100)}%)`),
+      );
+
+      const referenceBlobs: UploadedBlobRef[] = [];
+      for (let index = 0; index < referenceDocs.length; index++) {
+        const doc = referenceDocs[index];
+        setAnalyzeProgress(`참고자료 업로드 중... (${index + 1}/${referenceDocs.length})`);
+        referenceBlobs.push(await uploadFileToBlob(doc.blob, doc.name, doc.mimeType));
       }
       if (referenceDocs.length > 0) {
-        // Same field name repeated for each file — the standard multipart
-        // convention for "many files, one field", read back server-side via
-        // formData.getAll("reference"). See route.ts.
-        for (const doc of referenceDocs) {
-          formData.append("reference", doc.blob, doc.name);
-        }
         setReferenceFileNames(referenceDocs.map((doc) => doc.name));
       }
-      if (slideImages.length > 0) {
-        const thumbnails = await buildSlideThumbnails(slideImages);
-        formData.append("slideThumbnails", JSON.stringify(thumbnails));
-      }
+
+      const slideThumbnails = slideImages.length > 0 ? await buildSlideThumbnails(slideImages) : [];
+
+      setAnalyzeProgress(PROGRESS_STAGES[0]);
+      stageTimer = window.setInterval(() => {
+        setAnalyzeProgress((current) => {
+          const index = PROGRESS_STAGES.indexOf(current);
+          const next = PROGRESS_STAGES[Math.min(index + 1, PROGRESS_STAGES.length - 1)];
+          return next;
+        });
+      }, 4000);
 
       const response = await fetch("/api/transcribe-and-summarize", {
         method: "POST",
-        body: formData,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ audioBlob, referenceBlobs, bookmarks, keywords, slideThumbnails }),
       });
 
-      // Fast-fail validation (missing/empty/oversized file, missing server
-      // API key) never reaches the SSE stream below — the route returns a
-      // plain JSON error for those instead of starting to stream. See
+      // Fast-fail validation (missing file reference, missing server API
+      // key) never reaches the SSE stream below — the route returns a plain
+      // JSON error for those instead of starting to stream. See
       // app/api/transcribe-and-summarize/route.ts.
       if (!response.ok) {
         const errorBody = await response.json().catch(() => null);
@@ -330,12 +344,12 @@ export function RecordingDetailView({
         throw new Error("서버 응답을 스트리밍으로 받지 못했습니다. 다시 시도해주세요.");
       }
 
-      // The server streams SSE events the entire time it's uploading and
-      // transcribing (see route.ts) purely to keep the connection alive
-      // during a long (1h+) lecture — intermediate "chunk" events carry
-      // incomplete JSON fragments and are only useful as that keepalive
-      // signal, so they're discarded here. Only once the terminal "done"
-      // event arrives is there a complete result to parse.
+      // The server streams SSE events the entire time it's transcribing (see
+      // route.ts) purely to keep the connection alive during a long (1h+)
+      // lecture — intermediate "chunk" events carry incomplete JSON
+      // fragments and are only useful as that keepalive signal, so they're
+      // discarded here. Only once the terminal "done" event arrives is
+      // there a complete result to parse.
       let data: {
         transcript?: TranscriptSegment[];
         fullText?: string;
@@ -367,7 +381,7 @@ export function RecordingDetailView({
     } catch (error) {
       setAnalyzeError(error instanceof Error ? error.message : "분석 중 알 수 없는 오류가 발생했습니다.");
     } finally {
-      window.clearInterval(stageTimer);
+      if (stageTimer !== null) window.clearInterval(stageTimer);
       setIsAnalyzing(false);
       setAnalyzeProgress("");
     }

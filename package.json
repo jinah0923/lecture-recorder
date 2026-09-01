@@ -10,6 +10,7 @@
   "dependencies": {
     "@google/genai": "^2.17.1",
     "@notionhq/client": "^5.25.2",
+    "@vercel/blob": "^2.8.0",
     "html2canvas": "^1.4.1",
     "ioredis": "^6.0.0",
     "jspdf": "^4.2.1",

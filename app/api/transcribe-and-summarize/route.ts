@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { del, get } from "@vercel/blob";
 import { ApiError, GoogleGenAI, Type, createPartFromBase64, createPartFromUri, createUserContent } from "@google/genai";
 import type { File as GenAiFile, Part } from "@google/genai";
 
@@ -6,31 +7,48 @@ import type { File as GenAiFile, Part } from "@google/genai";
 // on Vercel is held open until the whole handler returns, and once nothing
 // has been written back to the client for a while, Vercel's proxy — or the
 // browser's own fetch — treats the connection as dead and the client sees
-// "Failed to fetch" long before a 1h lecture's upload + transcription
-// actually finishes. Edge Functions don't have that same idle-connection
-// behavior, and combined with the SSE response below (see POST), bytes
-// keep flowing to the client the whole time instead of going silent.
+// "Failed to fetch" long before a 1h lecture's transcription actually
+// finishes. Edge Functions don't have that same idle-connection behavior,
+// and combined with the SSE response below (see POST), bytes keep flowing
+// to the client the whole time instead of going silent.
 // @google/genai resolves to its browser/fetch-based build outside Node
 // (see its package.json "exports"), which is what makes this swap safe.
 export const runtime = "edge";
-// Long lectures (2-3h) mean upload + processing can run well past a few
-// minutes. 300s is Vercel Hobby's actual maximum for a Function's total
-// duration (confirmed against https://vercel.com/docs/functions/limitations,
-// checked 2026-08 — Hobby's default AND ceiling are both 300s; only Pro/
-// Enterprise can go higher, up to 800s or 1800s in extended-duration beta).
-// There's no larger number to put here on this plan — a plan upgrade is the
-// only way to raise this further for very long recordings.
+// Long lectures (2-3h) mean processing can run well past a few minutes.
+// 300s is Vercel Hobby's actual maximum for a Function's total duration
+// (confirmed against https://vercel.com/docs/functions/limitations, checked
+// 2026-08 — Hobby's default AND ceiling are both 300s; only Pro/Enterprise
+// can go higher, up to 800s or 1800s in extended-duration beta). There's no
+// larger number to put here on this plan — a plan upgrade is the only way
+// to raise this further for very long recordings.
 export const maxDuration = 300;
 // Separately, Vercel's docs note Edge Functions specifically "must begin
 // sending a response within 25 seconds to maintain streaming capabilities
 // beyond this period" — the periodic heartbeat below is tuned well under
-// that, and the very first byte is sent synchronously before any upload
-// work starts, so this route's time-to-first-byte is near-instant
-// regardless of how long the Gemini upload/processing that follows takes.
-// This route always reads a fresh multipart upload (request.formData()) and
-// calls out to Gemini — never cacheable, so opt out of static optimization
-// explicitly rather than relying on Next's implicit dynamic detection.
+// that, and the very first byte is sent synchronously before any work
+// starts, so this route's time-to-first-byte is near-instant regardless of
+// how long the Gemini processing that follows takes.
+// This route never caches (always fresh Gemini work) — opt out of static
+// optimization explicitly rather than relying on Next's implicit dynamic
+// detection.
 export const dynamic = "force-dynamic";
+
+// This route no longer receives the raw audio/reference file bytes at all —
+// the client uploads those to Vercel Blob first (see lib/blobUpload.ts and
+// app/api/blob-upload/route.ts) and this route only receives small JSON
+// pointing at the uploaded blobs by URL. A direct browser -> Gemini upload
+// was tried first and rejected outright by Google's endpoint (no CORS
+// support), so Blob storage is the actual bridge: this route downloads each
+// blob itself (a server-to-server fetch, subject to neither browser CORS
+// nor Vercel's 4.5MB request-body cap) and forwards it on to Gemini's Files
+// API, deleting the transient blob once that hand-off is done. That's what
+// actually solves the Vercel body-size ceiling for a 50+ minute lecture
+// recording — the file's bytes never pass through this Function's own
+// request body, so the platform's 4.5MB cap and this Function's duration
+// budget are never in the same critical path as the multi-hundred-MB
+// upload. This route's own job — the blob download/re-upload plus the
+// actual STT/analysis calls — still needs the 300s budget above, since that
+// part is genuinely long-running (unrelated to payload size).
 
 type IncomingBookmark = {
   id: string;
@@ -56,19 +74,21 @@ type IncomingSlideThumbnail = {
   dataUrl: string;
 };
 
+type IncomingBlobRef = {
+  url?: unknown;
+  fileName?: unknown;
+  mimeType?: unknown;
+};
+
+type AnalyzeRequestBody = {
+  audioBlob?: IncomingBlobRef;
+  referenceBlobs?: unknown;
+  bookmarks?: unknown;
+  keywords?: unknown;
+  slideThumbnails?: unknown;
+};
+
 const MODEL = "gemini-3.6-flash";
-// Files are uploaded via the Gemini Files API (not inline base64), which
-// supports up to 2GB per file — so these caps are just sane upper bounds for
-// a lecture recording (2-3h of Opus audio) and a reference document, not a
-// workaround for Gemini's much smaller ~20MB inline-data limit. Both are
-// already far above the 20MB floor multi-file/audio uploads need — there is
-// no separate Next.js "bodyParser sizeLimit" to raise here (that config only
-// exists for Pages Router API routes; this is an App Router Route Handler,
-// which has no such Next.js-level cap — see next.config.ts for the one real
-// platform-level constraint that does still apply, Vercel's 4.5MB request
-// body limit).
-const MAX_AUDIO_BYTES = 300 * 1024 * 1024; // 300MB
-const MAX_REFERENCE_BYTES = 50 * 1024 * 1024; // 50MB, per file
 // Mirrors ReferenceDocDropzone's own cap (components/ReferenceDocDropzone.tsx)
 // — enforced here too since the client-side limit is only a UX nicety, not
 // something this publicly reachable route can rely on by itself.
@@ -148,13 +168,6 @@ function formatTimestamp(ms: number) {
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
-// MediaRecorder typically reports a mimeType like "audio/webm;codecs=opus" —
-// Gemini expects a bare MIME type for inline data, so strip any parameters.
-function normalizeMimeType(mimeType: string): string {
-  const base = mimeType.split(";")[0].trim();
-  return base || "application/octet-stream";
-}
-
 // "data:image/webp;base64,AAAA..." -> a Gemini inline-image Part. Slide
 // thumbnails arrive this way (client-rendered canvas exports), never as an
 // uploaded File, so they go in as inline base64 rather than through the
@@ -189,8 +202,18 @@ function describeGeminiError(error: unknown): string {
   return `Gemini 분석 실패: ${message}`;
 }
 
+function parseBlobRef(raw: unknown): { url: string; fileName: string; mimeType: string } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const ref = raw as IncomingBlobRef;
+  const url = typeof ref.url === "string" ? ref.url : "";
+  const fileName = typeof ref.fileName === "string" ? ref.fileName : "";
+  const mimeType = typeof ref.mimeType === "string" ? ref.mimeType : "";
+  if (!url || !fileName) return null;
+  return { url, fileName, mimeType };
+}
+
 const GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com";
-// Matches @google/genai's own chunk size for the same upload protocol below.
+// Matches @google/genai's own chunk size for the same upload protocol.
 const UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
 
 // @google/genai's own `ai.files.upload()` sets a literal `Content-Length`
@@ -205,7 +228,7 @@ const UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
 // header on this one call that edge rejects.
 async function uploadFileToGemini(
   apiKey: string,
-  file: File,
+  file: Blob,
   displayName: string,
   mimeType: string,
 ): Promise<GenAiFile> {
@@ -259,6 +282,31 @@ async function uploadFileToGemini(
     throw new Error("파일 업로드 응답을 확인하지 못했습니다.");
   }
   return finalFile;
+}
+
+// Downloads a client-uploaded Vercel Blob (server-to-server — no CORS or
+// Vercel body-size constraint applies here) and re-uploads its bytes to
+// Gemini's Files API, then deletes the now-unneeded blob regardless of
+// whether that re-upload succeeded. The blob only ever exists to ferry
+// bytes from the browser to this Function; once Gemini has them, keeping it
+// around is pure storage cost.
+async function downloadAndUploadToGemini(
+  apiKey: string,
+  blobUrl: string,
+  displayName: string,
+  fallbackMimeType: string,
+): Promise<GenAiFile> {
+  const blobResult = await get(blobUrl, { access: "private" });
+  if (!blobResult) {
+    throw new Error("업로드된 파일을 찾을 수 없습니다. 다시 시도해주세요.");
+  }
+  try {
+    const fileBlob = await new Response(blobResult.stream).blob();
+    const mimeType = blobResult.blob.contentType || fallbackMimeType;
+    return await uploadFileToGemini(apiKey, fileBlob, displayName, mimeType);
+  } finally {
+    await del(blobUrl).catch(() => {});
+  }
 }
 
 // Uploaded files start in PROCESSING and must reach ACTIVE before they can
@@ -539,104 +587,63 @@ export async function POST(request: Request) {
     );
   }
 
-  let formData: FormData;
+  let body: AnalyzeRequestBody;
   try {
-    formData = await request.formData();
+    body = await request.json();
   } catch {
     return NextResponse.json({ error: "요청 본문을 읽을 수 없습니다." }, { status: 400 });
   }
 
-  const audioFile = formData.get("audio");
-  if (!(audioFile instanceof File)) {
-    return NextResponse.json({ error: "오디오 파일이 전달되지 않았습니다." }, { status: 400 });
-  }
-
-  if (audioFile.size === 0) {
-    return NextResponse.json({ error: "오디오 파일이 비어 있습니다. 다시 녹음하거나 업로드해주세요." }, { status: 400 });
-  }
-
-  if (audioFile.size > MAX_AUDIO_BYTES) {
-    const sizeMb = (audioFile.size / (1024 * 1024)).toFixed(1);
-    const maxMb = MAX_AUDIO_BYTES / (1024 * 1024);
+  // The audio must already be uploaded to Vercel Blob by the client
+  // (lib/blobUpload.ts) before this route is ever called — see the file-
+  // level comment above for why. Only its blob reference arrives here.
+  const audioBlobRef = parseBlobRef(body.audioBlob);
+  if (!audioBlobRef) {
     return NextResponse.json(
-      {
-        error: `오디오 파일 용량이 너무 큽니다 (최대 ${maxMb}MB, 현재 ${sizeMb}MB). 더 짧게 녹음하거나 파일을 나눠서 업로드해주세요.`,
-      },
-      { status: 413 },
+      { error: "오디오 파일 업로드 정보가 전달되지 않았습니다. 파일을 다시 첨부해주세요." },
+      { status: 400 },
     );
   }
 
-  // Same field name repeated once per file (see RecordingDetailView.tsx's
-  // handleAnalyze) — getAll reads all of them back as one array.
-  const referenceFiles = formData.getAll("reference").filter((entry): entry is File => entry instanceof File && entry.size > 0);
-
-  if (referenceFiles.length > MAX_REFERENCE_FILES) {
+  const referenceRawList = Array.isArray(body.referenceBlobs) ? body.referenceBlobs : [];
+  if (referenceRawList.length > MAX_REFERENCE_FILES) {
     return NextResponse.json(
       { error: `참고자료는 최대 ${MAX_REFERENCE_FILES}개까지만 첨부할 수 있습니다.` },
       { status: 400 },
     );
   }
-  for (const file of referenceFiles) {
-    if (file.size > MAX_REFERENCE_BYTES) {
-      const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
-      const maxMb = MAX_REFERENCE_BYTES / (1024 * 1024);
-      return NextResponse.json(
-        { error: `참고자료 '${file.name}'의 용량이 너무 큽니다 (최대 ${maxMb}MB, 현재 ${sizeMb}MB).` },
-        { status: 413 },
-      );
-    }
-  }
+  const referenceBlobRefs = referenceRawList
+    .map(parseBlobRef)
+    .filter((ref): ref is NonNullable<ReturnType<typeof parseBlobRef>> => ref !== null);
 
   let bookmarks: IncomingBookmark[] = [];
-  const bookmarksRaw = formData.get("bookmarks");
-  if (typeof bookmarksRaw === "string" && bookmarksRaw.length > 0) {
-    try {
-      const parsed = JSON.parse(bookmarksRaw);
-      if (Array.isArray(parsed)) bookmarks = parsed;
-    } catch {
-      // ignore malformed bookmarks, proceed without them
-    }
+  if (Array.isArray(body.bookmarks)) {
+    bookmarks = body.bookmarks;
   }
 
   let keywords: string[] = [];
-  const keywordsRaw = formData.get("keywords");
-  if (typeof keywordsRaw === "string" && keywordsRaw.length > 0) {
-    try {
-      const parsed = JSON.parse(keywordsRaw);
-      if (Array.isArray(parsed)) {
-        keywords = parsed.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
-      }
-    } catch {
-      // ignore malformed keywords, proceed without them
-    }
+  if (Array.isArray(body.keywords)) {
+    keywords = body.keywords.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
   }
 
   let slideThumbnails: IncomingSlideThumbnail[] = [];
-  const slideThumbnailsRaw = formData.get("slideThumbnails");
-  if (typeof slideThumbnailsRaw === "string" && slideThumbnailsRaw.length > 0) {
-    try {
-      const parsed = JSON.parse(slideThumbnailsRaw);
-      if (Array.isArray(parsed)) {
-        slideThumbnails = parsed.filter(
-          (item): item is IncomingSlideThumbnail =>
-            item && typeof item.page === "number" && typeof item.dataUrl === "string",
-        );
-      }
-    } catch {
-      // ignore malformed slide thumbnails, proceed without them
-    }
+  if (Array.isArray(body.slideThumbnails)) {
+    slideThumbnails = body.slideThumbnails.filter(
+      (item): item is IncomingSlideThumbnail =>
+        item && typeof item.page === "number" && typeof item.dataUrl === "string",
+    );
   }
 
   const ai = new GoogleGenAI({ apiKey });
 
-  // Everything from here on can run long enough (large-file upload,
-  // Gemini generation for a 1h+ lecture) to sit through Vercel's idle-
-  // connection cutoff if sent back as one plain JSON response — so instead
-  // this streams Server-Sent Events the whole way: "chunk" events (raw
-  // Gemini stream fragments, forwarded purely to keep bytes flowing —
-  // never meaningful on their own) and a final "done" event carrying the
-  // exact same JSON payload this route used to return directly. See
-  // ChunkListener above and the runtime/edge comment below.
+  // Everything from here on can run long enough (Gemini generation for a 1h+
+  // lecture) to sit through Vercel's idle-connection cutoff if sent back as
+  // one plain JSON response — so instead this streams Server-Sent Events the
+  // whole way: "chunk" events (raw Gemini stream fragments, forwarded purely
+  // to keep bytes flowing — never meaningful on their own) and a final
+  // "done" event carrying the exact same JSON payload this route used to
+  // return directly. See ChunkListener above and the runtime/edge comment
+  // below.
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream<Uint8Array>({
@@ -650,67 +657,59 @@ export async function POST(request: Request) {
         send("chunk", { worker, text });
       }
 
-      // Sent synchronously, before any upload/Gemini work begins — Vercel's
-      // Edge runtime requires a Function to begin sending its response
-      // within 25s to keep streaming past that point, so time-to-first-byte
-      // here is made near-zero rather than leaving it to chance.
+      // Sent synchronously, before any Gemini work begins — Vercel's Edge
+      // runtime requires a Function to begin sending its response within
+      // 25s to keep streaming past that point, so time-to-first-byte here
+      // is made near-zero rather than leaving it to chance.
       controller.enqueue(encoder.encode(`: stream-start\n\n`));
 
-      // Covers the upload + Gemini-side file-processing wait, before either
-      // worker's own stream has produced its first chunk — otherwise a large
-      // file's upload/processing time alone could leave the connection
-      // silent long enough to look dead. Well under the 25s edge threshold
-      // above for comfortable margin even if one tick is delayed.
+      // Covers the file-processing wait before either worker's own stream
+      // has produced its first chunk — otherwise a large file's Gemini-side
+      // processing time alone could leave the connection silent long enough
+      // to look dead. Well under the 25s edge threshold above for
+      // comfortable margin even if one tick is delayed.
       const heartbeat = setInterval(() => {
         if (closed) return;
         controller.enqueue(encoder.encode(`: keepalive\n\n`));
       }, 8000);
 
       try {
-        // Large lecture recordings (2-3h) and reference docs go through the
-        // Files API (upload once, reference by URI) instead of inline
-        // base64 — inline data tops out around ~20MB per request, far too
-        // small for a full lecture.
         let uploadedAudio: GenAiFile;
         try {
-          console.log("[transcribe-and-summarize] uploading audio to Gemini Files API", {
-            name: audioFile.name,
-            sizeBytes: audioFile.size,
-            mimeType: audioFile.type,
+          console.log("[transcribe-and-summarize] downloading audio blob and uploading to Gemini", {
+            fileName: audioBlobRef.fileName,
           });
-          uploadedAudio = await uploadFileToGemini(
+          uploadedAudio = await downloadAndUploadToGemini(
             apiKey,
-            audioFile,
-            audioFile.name,
-            normalizeMimeType(audioFile.type || "audio/webm"),
+            audioBlobRef.url,
+            audioBlobRef.fileName,
+            audioBlobRef.mimeType || "audio/webm",
           );
           uploadedAudio = await waitForFileActive(ai, uploadedAudio);
         } catch (error) {
-          console.error("[transcribe-and-summarize] audio upload failed", { error });
+          console.error("[transcribe-and-summarize] audio processing failed", { error });
           throw new Error(`오디오 처리 실패: ${describeGeminiError(error)}`);
         }
 
         const uploadedReferences: GenAiFile[] = [];
-        for (const refFile of referenceFiles) {
+        for (const ref of referenceBlobRefs) {
           try {
-            console.log("[transcribe-and-summarize] uploading reference doc to Gemini Files API", {
-              name: refFile.name,
-              sizeBytes: refFile.size,
-              mimeType: refFile.type,
+            console.log("[transcribe-and-summarize] downloading reference blob and uploading to Gemini", {
+              fileName: ref.fileName,
             });
-            let uploadedReference = await uploadFileToGemini(
+            let uploadedReference = await downloadAndUploadToGemini(
               apiKey,
-              refFile,
-              refFile.name,
-              normalizeMimeType(refFile.type || "application/pdf"),
+              ref.url,
+              ref.fileName,
+              ref.mimeType || "application/pdf",
             );
             uploadedReference = await waitForFileActive(ai, uploadedReference);
             uploadedReferences.push(uploadedReference);
           } catch (error) {
-            console.error("[transcribe-and-summarize] reference upload failed", { error, fileName: refFile.name });
+            console.error("[transcribe-and-summarize] reference processing failed", { error, fileName: ref.fileName });
             await deleteUploadedFile(ai, uploadedAudio);
             await Promise.all(uploadedReferences.map((file) => deleteUploadedFile(ai, file)));
-            throw new Error(`참고자료 '${refFile.name}' 처리 실패: ${describeGeminiError(error)}`);
+            throw new Error(`참고자료 '${ref.fileName}' 처리 실패: ${describeGeminiError(error)}`);
           }
         }
 
