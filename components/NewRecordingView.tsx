@@ -58,7 +58,7 @@ export function NewRecordingView({
       audioMimeType: audio.mimeType,
       bookmarks,
       keywords: [],
-      referenceFileName: "",
+      referenceFileNames: [],
       aiResult: null,
     };
 

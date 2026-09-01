@@ -26,8 +26,8 @@ async function requireUserEmail(): Promise<string | null> {
 // deliberately here too since they're base64 image data large enough to blow
 // through Redis's free-tier storage cap, same reasoning as audio.
 function stripToSyncableFields(session: LectureSession): LectureSession {
-  const { id, title, category, createdAt, updatedAt, durationMs, audioFileName, audioMimeType, bookmarks, keywords, referenceFileName, aiResult } = session;
-  return { id, title, category, createdAt, updatedAt, durationMs, audioFileName, audioMimeType, bookmarks, keywords, referenceFileName, aiResult };
+  const { id, title, category, createdAt, updatedAt, durationMs, audioFileName, audioMimeType, bookmarks, keywords, referenceFileNames, aiResult } = session;
+  return { id, title, category, createdAt, updatedAt, durationMs, audioFileName, audioMimeType, bookmarks, keywords, referenceFileNames, aiResult };
 }
 
 export async function GET() {

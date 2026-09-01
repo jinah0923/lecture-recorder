@@ -70,7 +70,7 @@ export type LectureSession = {
   audioMimeType: string;
   bookmarks: Bookmark[];
   keywords: string[];
-  referenceFileName: string;
+  referenceFileNames: string[];
   aiResult: AiResult | null;
 };
 

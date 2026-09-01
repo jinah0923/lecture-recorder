@@ -52,7 +52,11 @@ const MODEL = "gemini-3.6-flash";
 // a lecture recording (2-3h of Opus audio) and a reference document, not a
 // workaround for Gemini's much smaller ~20MB inline-data limit.
 const MAX_AUDIO_BYTES = 300 * 1024 * 1024; // 300MB
-const MAX_REFERENCE_BYTES = 50 * 1024 * 1024; // 50MB
+const MAX_REFERENCE_BYTES = 50 * 1024 * 1024; // 50MB, per file
+// Mirrors ReferenceDocDropzone's own cap (components/ReferenceDocDropzone.tsx)
+// — enforced here too since the client-side limit is only a UX nicety, not
+// something this publicly reachable route can rely on by itself.
+const MAX_REFERENCE_FILES = 5;
 // How long to wait for an uploaded file to finish Gemini-side processing
 // (ACTIVE) before giving up.
 const FILE_PROCESSING_TIMEOUT_MS = 5 * 60 * 1000;
@@ -352,13 +356,13 @@ async function callSttWorker(ai: GoogleGenAI, uploadedAudio: GenAiFile, onChunk:
 async function callAnalysisWorker(
   ai: GoogleGenAI,
   uploadedAudio: GenAiFile,
-  uploadedReference: GenAiFile | null,
+  uploadedReferences: GenAiFile[],
   slideThumbnails: IncomingSlideThumbnail[],
   keywords: string[],
   bookmarkLines: string,
   onChunk: ChunkListener,
 ): Promise<RawAnalysisResponse> {
-  const hasReference = uploadedReference !== null;
+  const hasReference = uploadedReferences.length > 0;
   const hasSlideImages = slideThumbnails.length > 0;
 
   const systemInstruction = [
@@ -435,7 +439,9 @@ async function callAnalysisWorker(
   if (hasReference) {
     promptLines.push(
       "",
-      "[강의안 통합 지침] 오디오와 함께 강의 참고자료(슬라이드/문서)가 첨부되어 있습니다.",
+      uploadedReferences.length > 1
+        ? `[강의안 통합 지침] 오디오와 함께 강의 참고자료 ${uploadedReferences.length}개(슬라이드/문서)가 첨부되어 있습니다. 개별 자료로 따로 다루지 말고, 모두 하나의 강의 자료 묶음으로 취급해 종합적으로 활용하세요.`
+        : "[강의안 통합 지침] 오디오와 함께 강의 참고자료(슬라이드/문서)가 첨부되어 있습니다.",
       "- STT 보정: 참고자료에 나오는 전문 용어와 고유명사도 사전으로 활용해 오인식을 교정하세요.",
       "- 통합 체크리스트: 교수가 음성으로 언급한 과제/공지사항뿐 아니라, 참고자료에 있는 연습문제나 반드시 암기해야 할 핵심 항목도 checklist에 포함하세요.",
     );
@@ -451,7 +457,7 @@ async function callAnalysisWorker(
     userPrompt,
     createPartFromUri(uploadedAudio.uri ?? "", uploadedAudio.mimeType ?? "audio/webm"),
   ];
-  if (uploadedReference) {
+  for (const uploadedReference of uploadedReferences) {
     contentParts.push(
       createPartFromUri(uploadedReference.uri ?? "", uploadedReference.mimeType ?? "application/pdf"),
     );
@@ -469,9 +475,7 @@ async function callAnalysisWorker(
   console.log("[transcribe-and-summarize] calling Gemini (analysis worker)", {
     model: MODEL,
     audioFile: { uri: uploadedAudio.uri, mimeType: uploadedAudio.mimeType, name: uploadedAudio.name },
-    referenceFile: uploadedReference
-      ? { uri: uploadedReference.uri, mimeType: uploadedReference.mimeType, name: uploadedReference.name }
-      : null,
+    referenceFiles: uploadedReferences.map((file) => ({ uri: file.uri, mimeType: file.mimeType, name: file.name })),
     slideThumbnailCount: sortedThumbnails.length,
     promptChars: userPrompt.length,
     keywordCount: keywords.length,
@@ -546,15 +550,25 @@ export async function POST(request: Request) {
     );
   }
 
-  const referenceFile = formData.get("reference");
-  const hasReference = referenceFile instanceof File && referenceFile.size > 0;
-  if (hasReference && (referenceFile as File).size > MAX_REFERENCE_BYTES) {
-    const sizeMb = ((referenceFile as File).size / (1024 * 1024)).toFixed(1);
-    const maxMb = MAX_REFERENCE_BYTES / (1024 * 1024);
+  // Same field name repeated once per file (see RecordingDetailView.tsx's
+  // handleAnalyze) — getAll reads all of them back as one array.
+  const referenceFiles = formData.getAll("reference").filter((entry): entry is File => entry instanceof File && entry.size > 0);
+
+  if (referenceFiles.length > MAX_REFERENCE_FILES) {
     return NextResponse.json(
-      { error: `참고자료 파일 용량이 너무 큽니다 (최대 ${maxMb}MB, 현재 ${sizeMb}MB).` },
-      { status: 413 },
+      { error: `참고자료는 최대 ${MAX_REFERENCE_FILES}개까지만 첨부할 수 있습니다.` },
+      { status: 400 },
     );
+  }
+  for (const file of referenceFiles) {
+    if (file.size > MAX_REFERENCE_BYTES) {
+      const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
+      const maxMb = MAX_REFERENCE_BYTES / (1024 * 1024);
+      return NextResponse.json(
+        { error: `참고자료 '${file.name}'의 용량이 너무 큽니다 (최대 ${maxMb}MB, 현재 ${sizeMb}MB).` },
+        { status: 413 },
+      );
+    }
   }
 
   let bookmarks: IncomingBookmark[] = [];
@@ -653,26 +667,27 @@ export async function POST(request: Request) {
           throw new Error(`오디오 처리 실패: ${describeGeminiError(error)}`);
         }
 
-        let uploadedReference: GenAiFile | null = null;
-        if (hasReference) {
+        const uploadedReferences: GenAiFile[] = [];
+        for (const refFile of referenceFiles) {
           try {
-            const refFile = referenceFile as File;
             console.log("[transcribe-and-summarize] uploading reference doc to Gemini Files API", {
               name: refFile.name,
               sizeBytes: refFile.size,
               mimeType: refFile.type,
             });
-            uploadedReference = await uploadFileToGemini(
+            let uploadedReference = await uploadFileToGemini(
               apiKey,
               refFile,
               refFile.name,
               normalizeMimeType(refFile.type || "application/pdf"),
             );
             uploadedReference = await waitForFileActive(ai, uploadedReference);
+            uploadedReferences.push(uploadedReference);
           } catch (error) {
-            console.error("[transcribe-and-summarize] reference upload failed", { error });
+            console.error("[transcribe-and-summarize] reference upload failed", { error, fileName: refFile.name });
             await deleteUploadedFile(ai, uploadedAudio);
-            throw new Error(`참고자료 처리 실패: ${describeGeminiError(error)}`);
+            await Promise.all(uploadedReferences.map((file) => deleteUploadedFile(ai, file)));
+            throw new Error(`참고자료 '${refFile.name}' 처리 실패: ${describeGeminiError(error)}`);
           }
         }
 
@@ -691,7 +706,7 @@ export async function POST(request: Request) {
         try {
           [sttResult, analysisResult] = await Promise.all([
             callSttWorker(ai, uploadedAudio, sendChunk),
-            callAnalysisWorker(ai, uploadedAudio, uploadedReference, slideThumbnails, keywords, bookmarkLines, sendChunk),
+            callAnalysisWorker(ai, uploadedAudio, uploadedReferences, slideThumbnails, keywords, bookmarkLines, sendChunk),
           ]);
         } catch (error) {
           console.error("[transcribe-and-summarize] Gemini call failed", {
@@ -704,7 +719,7 @@ export async function POST(request: Request) {
           // Best-effort cleanup — Files API entries auto-expire after 48h
           // anyway, so a failed delete here isn't worth surfacing to the user.
           await deleteUploadedFile(ai, uploadedAudio);
-          if (uploadedReference) await deleteUploadedFile(ai, uploadedReference);
+          await Promise.all(uploadedReferences.map((file) => deleteUploadedFile(ai, file)));
         }
 
         const rawSegments = Array.isArray(sttResult.script) ? sttResult.script : [];

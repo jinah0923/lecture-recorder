@@ -66,12 +66,13 @@ export function RecordingDetailView({
   const [analyzeError, setAnalyzeError] = useState<string | null>(null);
 
   const [keywords, setKeywords] = useState<string[]>([]);
-  const [referenceFileName, setReferenceFileName] = useState("");
-  // The reference document's blob is never persisted — only its filename is,
-  // same treatment as the audio blob.
-  const [referenceDoc, setReferenceDoc] = useState<ReferenceDocument | null>(null);
+  const [referenceFileNames, setReferenceFileNames] = useState<string[]>([]);
+  // The reference documents' blobs are never persisted — only their
+  // filenames are, same treatment as the audio blob. Up to
+  // MAX_REFERENCE_DOCUMENTS (see ReferenceDocDropzone) for this session.
+  const [referenceDocs, setReferenceDocs] = useState<ReferenceDocument[]>([]);
 
-  // Unlike referenceDoc's blob, the rendered slide images ARE persisted
+  // Unlike referenceDocs' blobs, the rendered slide images ARE persisted
   // (their own IndexedDB store, see lib/db.ts) — they need to still be
   // there when the user reopens this session later, long after the PDF
   // itself is gone from memory.
@@ -116,7 +117,12 @@ export function RecordingDetailView({
       setAudioMimeType(session.audioMimeType);
       setBookmarks(session.bookmarks);
       setKeywords(session.keywords ?? []);
-      setReferenceFileName(session.referenceFileName ?? "");
+      // A session saved before multi-file support only has the old singular
+      // referenceFileName string — fall back to wrapping that in an array.
+      const legacySession = session as LectureSession & { referenceFileName?: string };
+      setReferenceFileNames(
+        session.referenceFileNames ?? (legacySession.referenceFileName ? [legacySession.referenceFileName] : []),
+      );
       setAiResult(session.aiResult);
       setHydrated(true);
     });
@@ -148,7 +154,7 @@ export function RecordingDetailView({
       audioMimeType,
       bookmarks,
       keywords,
-      referenceFileName,
+      referenceFileNames,
       aiResult,
     };
     pendingSaveRef.current = session;
@@ -169,7 +175,7 @@ export function RecordingDetailView({
     audioMimeType,
     bookmarks,
     keywords,
-    referenceFileName,
+    referenceFileNames,
     aiResult,
     onSessionSaved,
   ]);
@@ -197,28 +203,54 @@ export function RecordingDetailView({
     setCategory(name);
   }
 
+  function isPdfDocument(doc: ReferenceDocument): boolean {
+    return doc.mimeType === "application/pdf" || doc.name.toLowerCase().endsWith(".pdf");
+  }
+
   // Extracting slide images is a nice-to-have on top of analysis, not a
-  // precondition for it — a failure here (corrupt PDF, browser lacking
-  // canvas/WebP support, etc.) is swallowed rather than blocking the
+  // precondition for it — a failure on any one PDF (corrupt file, browser
+  // lacking canvas/WebP support, etc.) is swallowed rather than blocking the
   // attach, and the lecture note still generates fine without slide photos.
-  async function handleReferenceDocChange(doc: ReferenceDocument) {
-    setReferenceDoc(doc);
-    const isPdf = doc.mimeType === "application/pdf" || doc.name.toLowerCase().endsWith(".pdf");
-    if (!isPdf) {
+  // Re-run in full against the current attachment list on every add/remove
+  // (rather than diffing) — page numbers are offset per PDF so a `slide_X`
+  // placeholder stays globally unique even across multiple decks.
+  async function refreshSlideImages(docs: ReferenceDocument[]) {
+    const pdfDocs = docs.filter(isPdfDocument);
+    if (pdfDocs.length === 0) {
       setSlideImages([]);
+      await saveSlideImages(sessionId, []);
       return;
     }
     setIsExtractingSlides(true);
     try {
-      const slides = await extractPdfSlides(doc.blob);
-      setSlideImages(slides);
-      await saveSlideImages(sessionId, slides);
+      const allSlides: SlideImage[] = [];
+      let pageOffset = 0;
+      for (const doc of pdfDocs) {
+        const slides = await extractPdfSlides(doc.blob);
+        for (const slide of slides) {
+          allSlides.push({ page: slide.page + pageOffset, dataUrl: slide.dataUrl });
+        }
+        pageOffset += slides.length;
+      }
+      setSlideImages(allSlides);
+      await saveSlideImages(sessionId, allSlides);
     } catch (error) {
       console.error("슬라이드 이미지 추출 실패:", error);
       setSlideImages([]);
     } finally {
       setIsExtractingSlides(false);
     }
+  }
+
+  async function handleReferenceDocsChange(nextDocs: ReferenceDocument[]) {
+    setReferenceDocs(nextDocs);
+    await refreshSlideImages(nextDocs);
+  }
+
+  async function handleRemoveReferenceDoc(index: number) {
+    const nextDocs = referenceDocs.filter((_, i) => i !== index);
+    setReferenceDocs(nextDocs);
+    await refreshSlideImages(nextDocs);
   }
 
   async function handleReattach(file: File) {
@@ -267,9 +299,14 @@ export function RecordingDetailView({
       if (keywords.length > 0) {
         formData.append("keywords", JSON.stringify(keywords));
       }
-      if (referenceDoc) {
-        formData.append("reference", referenceDoc.blob, referenceDoc.name);
-        setReferenceFileName(referenceDoc.name);
+      if (referenceDocs.length > 0) {
+        // Same field name repeated for each file — the standard multipart
+        // convention for "many files, one field", read back server-side via
+        // formData.getAll("reference"). See route.ts.
+        for (const doc of referenceDocs) {
+          formData.append("reference", doc.blob, doc.name);
+        }
+        setReferenceFileNames(referenceDocs.map((doc) => doc.name));
       }
       if (slideImages.length > 0) {
         const thumbnails = await buildSlideThumbnails(slideImages);
@@ -440,7 +477,7 @@ export function RecordingDetailView({
             onCreateAndSelect={handleCreateAndSelectCategory}
           />
         </div>
-        {(keywords.length > 0 || referenceFileName) && (
+        {(keywords.length > 0 || referenceFileNames.length > 0) && (
           <div className="mt-2 flex flex-wrap items-center gap-1.5 px-1">
             {keywords.map((word) => (
               <span
@@ -450,11 +487,14 @@ export function RecordingDetailView({
                 #{word}
               </span>
             ))}
-            {referenceFileName && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:bg-amber-950/40 dark:text-amber-400">
-                📎 {referenceFileName}
+            {referenceFileNames.map((name) => (
+              <span
+                key={name}
+                className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:bg-amber-950/40 dark:text-amber-400"
+              >
+                📎 {name}
               </span>
-            )}
+            ))}
           </div>
         )}
       </div>
@@ -488,22 +528,19 @@ export function RecordingDetailView({
 
           <CollapsibleCard
             title="강의안 / 참고자료 첨부"
-            subtitle="PDF, TXT, 이미지 강의안"
+            subtitle="PDF, TXT, 이미지 강의안 (최대 5개)"
             badge={
-              referenceDoc ? (
+              referenceDocs.length > 0 ? (
                 <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-medium text-emerald-600 dark:bg-emerald-950/50 dark:text-emerald-400">
-                  첨부됨
+                  {referenceDocs.length}개 첨부됨
                 </span>
               ) : undefined
             }
           >
             <ReferenceDocDropzone
-              document={referenceDoc}
-              onDocumentChange={handleReferenceDocChange}
-              onClear={() => {
-                setReferenceDoc(null);
-                setSlideImages([]);
-              }}
+              documents={referenceDocs}
+              onDocumentsChange={handleReferenceDocsChange}
+              onRemove={handleRemoveReferenceDoc}
             />
             {isExtractingSlides && (
               <p className="mt-2 flex items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400">
