@@ -26,6 +26,12 @@ type NotionRichText = {
 // the broader, recursively-nested `BlockObjectRequest` union type.
 type NotionParagraphBlock = { type: "paragraph"; paragraph: { rich_text: NotionRichText[] } };
 
+// The single-level-children constraint above applies to convertLectureNoteToBlocks'
+// own <details> -> toggle conversion too (see below) — this derives the SDK's
+// exact expected children type from BlockObjectRequest itself (the type
+// isn't exported under its own name) rather than redeclaring it by hand.
+type ToggleChildBlocks = NonNullable<Extract<BlockObjectRequest, { type?: "toggle" }>["toggle"]["children"]>;
+
 type IncomingChecklistItem = { text?: unknown; done?: unknown };
 type IncomingTranscriptSegment = { startMs?: unknown; text?: unknown };
 
@@ -103,21 +109,62 @@ function stripCalloutEmoji(line: string, emoji: string): string {
  * **bold**, and 🔥/💡/🗣️/💜 callout lines — see lib/markdown.tsx, the
  * in-app renderer this mirrors) into Notion's official block objects.
  */
-function convertLectureNoteToBlocks(markdown: string): BlockObjectRequest[] {
+// depth > 0 means "already inside a toggle's own children" — Notion's API
+// only accepts one level of nested children per request, so a <details>
+// line encountered there is left as literal text (via the final plain-
+// paragraph fallback below) rather than expanded into a second toggle,
+// which both keeps the request valid and makes the cast in the depth === 0
+// branch below provably safe (nothing this function returns at depth > 0
+// can itself carry a `children` field).
+function convertLectureNoteToBlocks(markdown: string, depth = 0): BlockObjectRequest[] {
   const lines = markdown.split("\n");
   const blocks: BlockObjectRequest[] = [];
+  let index = 0;
 
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
-    if (!line) continue;
+  while (index < lines.length) {
+    const line = lines[index].trim();
+    if (!line) {
+      index++;
+      continue;
+    }
+
+    // <details>/<summary>...</summary>...</details> — see lib/markdown.tsx
+    // for the on-screen version this mirrors. Notion has a native toggle
+    // block for exactly this (already used below for the transcript), so
+    // it maps directly rather than needing a fallback representation.
+    if (line === "<details>" && depth === 0) {
+      let cursor = index + 1;
+      let summaryText = "부가 정보";
+      const summaryMatch = cursor < lines.length ? lines[cursor].trim().match(/^<summary>(.*)<\/summary>$/) : null;
+      if (summaryMatch) {
+        summaryText = summaryMatch[1].trim() || summaryText;
+        cursor++;
+      }
+      const innerLines: string[] = [];
+      while (cursor < lines.length && lines[cursor].trim() !== "</details>") {
+        innerLines.push(lines[cursor]);
+        cursor++;
+      }
+      const children = convertLectureNoteToBlocks(innerLines.join("\n"), depth + 1) as ToggleChildBlocks;
+      blocks.push({
+        type: "toggle",
+        toggle: { rich_text: buildRichText(summaryText), children },
+      });
+      index = cursor + 1;
+      continue;
+    }
 
     if (line.startsWith("|")) {
-      if (/^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?$/.test(line)) continue; // table separator row
+      if (/^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?$/.test(line)) {
+        index++;
+        continue; // table separator row
+      }
       const cells = line.replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
       blocks.push({
         type: "paragraph",
         paragraph: { rich_text: buildRichText(cells.join("  ·  ")) },
       });
+      index++;
       continue;
     }
 
@@ -130,6 +177,7 @@ function convertLectureNoteToBlocks(markdown: string): BlockObjectRequest[] {
       } else {
         blocks.push({ type: "heading_3", heading_3: { rich_text: richText } });
       }
+      index++;
       continue;
     }
 
@@ -139,6 +187,7 @@ function convertLectureNoteToBlocks(markdown: string): BlockObjectRequest[] {
         type: "bulleted_list_item",
         bulleted_list_item: { rich_text: buildRichText(bulletMatch[1]) },
       });
+      index++;
       continue;
     }
 
@@ -152,6 +201,7 @@ function convertLectureNoteToBlocks(markdown: string): BlockObjectRequest[] {
         type: "paragraph",
         paragraph: { rich_text: buildRichText(`🖼️ 슬라이드 ${slideMatch[1]} (이미지는 앱에서 확인해주세요)`) },
       });
+      index++;
       continue;
     }
 
@@ -165,10 +215,12 @@ function convertLectureNoteToBlocks(markdown: string): BlockObjectRequest[] {
           rich_text: buildRichText(stripCalloutEmoji(line, calloutEmoji)),
         },
       });
+      index++;
       continue;
     }
 
     blocks.push({ type: "paragraph", paragraph: { rich_text: buildRichText(line) } });
+    index++;
   }
 
   return blocks;

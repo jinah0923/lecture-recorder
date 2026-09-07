@@ -128,6 +128,36 @@ function renderMarkdownToHtml(markdown: string, slideImages?: Map<number, string
       continue;
     }
 
+    // <details>/<summary>...</summary>...</details> — see lib/markdown.tsx
+    // for the on-screen version this mirrors. A static PDF page can't
+    // collapse anything, so this renders as an always-visible, clearly
+    // labeled sub-box instead of an interactive toggle — the content still
+    // needs to actually appear in the export, just visually set apart.
+    if (line === "<details>") {
+      flushList();
+      let cursor = index + 1;
+      let summaryText = "부가 정보";
+      const summaryMatch = cursor < lines.length ? lines[cursor].trim().match(/^<summary>(.*)<\/summary>$/) : null;
+      if (summaryMatch) {
+        summaryText = summaryMatch[1].trim() || summaryText;
+        cursor++;
+      }
+      const innerLines: string[] = [];
+      while (cursor < lines.length && lines[cursor].trim() !== "</details>") {
+        innerLines.push(lines[cursor]);
+        cursor++;
+      }
+      const innerHtml = renderMarkdownToHtml(innerLines.join("\n").trim(), slideImages);
+      blocks.push(
+        `<div ${AVOID_BREAK_ATTR} style="${AVOID_BREAK_STYLE}margin:6px 0;border:1px solid #e5e7eb;border-radius:8px;background:#fafafa;">` +
+          `<p style="margin:0;padding:8px 12px;font-size:12px;font-weight:700;color:#6b7280;border-bottom:1px solid #e5e7eb;">📎 ${escapeHtml(summaryText)}</p>` +
+          `<div style="padding:8px 12px;">${innerHtml}</div>` +
+          `</div>`,
+      );
+      index = cursor + 1;
+      continue;
+    }
+
     if (line.startsWith("|") && index + 1 < lines.length && isTableSeparatorRow(lines[index + 1])) {
       flushList();
       const headerCells = splitTableRow(line);

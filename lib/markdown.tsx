@@ -125,6 +125,52 @@ export function renderMarkdown(markdown: string, slideImages?: Map<number, strin
       continue;
     }
 
+    // <details>/<summary>...</summary>...</details> — the AI wraps
+    // non-essential asides (professor bio, one-off icebreakers) in this so
+    // they don't clutter the main flow; each tag must be on its own line
+    // per the prompt (app/api/transcribe-and-summarize/route.ts), so this
+    // only ever needs to match a bare "<details>" line, not inline HTML.
+    if (line === "<details>") {
+      flushList(String(index));
+      let cursor = index + 1;
+      let summaryText = "부가 정보";
+      const summaryMatch = cursor < lines.length ? lines[cursor].trim().match(/^<summary>(.*)<\/summary>$/) : null;
+      if (summaryMatch) {
+        summaryText = summaryMatch[1].trim() || summaryText;
+        cursor++;
+      }
+      const innerLines: string[] = [];
+      while (cursor < lines.length && lines[cursor].trim() !== "</details>") {
+        innerLines.push(lines[cursor]);
+        cursor++;
+      }
+      blocks.push(
+        <details
+          key={index}
+          className="group rounded-lg border border-slate-200 bg-zinc-50 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-900/40"
+        >
+          <summary className="flex cursor-pointer list-none items-center gap-1.5 text-sm font-medium text-zinc-600 marker:hidden dark:text-zinc-400 [&::-webkit-details-marker]:hidden">
+            <svg
+              viewBox="0 0 24 24"
+              className="h-3.5 w-3.5 shrink-0 stroke-current transition-transform group-open:rotate-90"
+              fill="none"
+              strokeWidth="2"
+            >
+              <path d="M9 6l6 6-6 6" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            {summaryText}
+          </summary>
+          <div className="mt-2 border-t border-slate-200 pt-2 dark:border-zinc-800">
+            {renderMarkdown(innerLines.join("\n").trim(), slideImages)}
+          </div>
+        </details>,
+      );
+      // cursor sits on the "</details>" line (or ran off the end if the AI
+      // left it unclosed) — either way, resume just past it.
+      index = cursor + 1;
+      continue;
+    }
+
     // Markdown table: a "| ... |" header row immediately followed by a separator row.
     if (line.startsWith("|") && index + 1 < lines.length && isTableSeparatorRow(lines[index + 1])) {
       flushList(String(index));
