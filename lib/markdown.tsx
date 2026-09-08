@@ -2,6 +2,16 @@ import type { ReactNode } from "react";
 import { SlideImage } from "@/components/SlideImage";
 
 const CALLOUT_STYLES: Array<{ emoji: string; className: string }> = [
+  // Deliberately bolder than every other callout below (thicker border,
+  // more saturated background, bold text) — this is the AI's "confirmed
+  // exam question" marker (see the [시험 출제 신호 감지] prompt rule in
+  // app/api/transcribe-and-summarize/route.ts), meant to visually outrank
+  // the plain 🔥 emphasis callout, not just duplicate it in another color.
+  {
+    emoji: "🚨",
+    className:
+      "border-2 border-red-400 bg-red-100 font-semibold text-red-900 dark:border-red-500/70 dark:bg-red-950/60 dark:text-red-200",
+  },
   {
     emoji: "🔥",
     className: "border-red-200 bg-red-50 text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-300",

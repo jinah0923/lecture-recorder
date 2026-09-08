@@ -48,14 +48,29 @@ type ExportRequestBody = {
 // Notion's ApiColor type isn't exported by the SDK, so this narrow literal
 // union is declared locally — its members are a subset of ApiColor's, which
 // is enough for structural assignment into callout.color below.
-type NotionCalloutColor = "red_background" | "orange_background" | "blue_background" | "purple_background";
+type NotionCalloutColor =
+  | "red_background"
+  | "yellow_background"
+  | "orange_background"
+  | "blue_background"
+  | "purple_background";
 
+// 🚨 takes red — Notion's strongest available callout color — since it's
+// the AI's "confirmed exam question" marker (see the [시험 출제 신호 감지]
+// prompt rule in app/api/transcribe-and-summarize/route.ts) and needs to
+// visually outrank the plain 🔥 emphasis callout, not just duplicate it in
+// another color; 🔥 moved to yellow to free red up rather than collide.
 const CALLOUT_COLOR_BY_EMOJI: Record<string, NotionCalloutColor> = {
-  "🔥": "red_background",
+  "🚨": "red_background",
+  "🔥": "yellow_background",
   "💡": "orange_background",
   "🗣️": "blue_background",
   "💜": "purple_background",
 };
+// Bolded on top of its color, unlike the others — extra emphasis to match
+// the on-screen (lib/markdown.tsx) and PDF (lib/pdfExport.ts) renderers,
+// which also give 🚨 a visually heavier treatment than the rest.
+const BOLD_CALLOUT_EMOJIS = new Set(["🚨"]);
 const CALLOUT_EMOJIS = Object.keys(CALLOUT_COLOR_BY_EMOJI);
 
 function chunkArray<T>(items: T[], size: number): T[][] {
@@ -264,7 +279,7 @@ function convertLectureNoteToBlocks(markdown: string, depth = 0): BlockObjectReq
         callout: {
           icon: { type: "emoji", emoji: calloutEmoji },
           color: CALLOUT_COLOR_BY_EMOJI[calloutEmoji],
-          rich_text: buildRichText(stripCalloutEmoji(line, calloutEmoji)),
+          rich_text: buildRichText(stripCalloutEmoji(line, calloutEmoji), BOLD_CALLOUT_EMOJIS.has(calloutEmoji)),
         },
       });
       index++;

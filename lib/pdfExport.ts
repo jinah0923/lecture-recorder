@@ -20,9 +20,15 @@ import type { ChecklistItem, TranscriptSegment } from "@/lib/types";
 // avoid slicing through a callout box or table (marked via
 // data-avoid-break) instead of relying on html2pdf.js's pagebreak plugin.
 
-type CalloutStyle = { emoji: string; bg: string; border: string; text: string };
+type CalloutStyle = { emoji: string; bg: string; border: string; text: string; borderWidth?: string; bold?: boolean };
 
 const PDF_CALLOUT_STYLES: CalloutStyle[] = [
+  // Deliberately bolder than every other callout below (thicker border,
+  // more saturated colors, bold text) — the AI's "confirmed exam question"
+  // marker (see the [시험 출제 신호 감지] prompt rule in
+  // app/api/transcribe-and-summarize/route.ts), meant to visually outrank
+  // the plain 🔥 emphasis callout, not just duplicate it in another color.
+  { emoji: "🚨", bg: "#fee2e2", border: "#f87171", text: "#7f1d1d", borderWidth: "2px", bold: true },
   { emoji: "🔥", bg: "#fef2f2", border: "#fecaca", text: "#991b1b" },
   { emoji: "💡", bg: "#fefce8", border: "#fef08a", text: "#854d0e" },
   { emoji: "🗣️", bg: "#eff6ff", border: "#bfdbfe", text: "#1e40af" },
@@ -103,7 +109,7 @@ function renderMarkdownToHtml(markdown: string, slideImages?: Map<number, string
         .map((item) => {
           const callout = detectCallout(item);
           if (callout) {
-            return `<div ${AVOID_BREAK_ATTR} style="${AVOID_BREAK_STYLE}border:1px solid ${callout.border};border-radius:8px;padding:8px 12px;font-size:12.5px;background:${callout.bg};color:${callout.text};">${renderInlineHtml(item)}</div>`;
+            return `<div ${AVOID_BREAK_ATTR} style="${AVOID_BREAK_STYLE}border:${callout.borderWidth ?? "1px"} solid ${callout.border};border-radius:8px;padding:8px 12px;font-size:12.5px;background:${callout.bg};color:${callout.text};${callout.bold ? "font-weight:600;" : ""}">${renderInlineHtml(item)}</div>`;
           }
           return `<ul style="margin:0;padding-left:18px;list-style-type:disc;"><li style="${BODY_STYLE}">${renderInlineHtml(item)}</li></ul>`;
         })
@@ -241,7 +247,7 @@ function renderMarkdownToHtml(markdown: string, slideImages?: Map<number, string
       }
       const groupHtml = groupLines.map((groupLine) => `<p style="margin:0;">${renderInlineHtml(groupLine)}</p>`).join("");
       blocks.push(
-        `<div ${AVOID_BREAK_ATTR} style="${AVOID_BREAK_STYLE}border:1px solid ${callout.border};border-radius:8px;padding:8px 12px;margin:6px 0;display:flex;flex-direction:column;gap:4px;font-size:12.5px;background:${callout.bg};color:${callout.text};">${groupHtml}</div>`,
+        `<div ${AVOID_BREAK_ATTR} style="${AVOID_BREAK_STYLE}border:${callout.borderWidth ?? "1px"} solid ${callout.border};border-radius:8px;padding:8px 12px;margin:6px 0;display:flex;flex-direction:column;gap:4px;font-size:12.5px;background:${callout.bg};color:${callout.text};${callout.bold ? "font-weight:600;" : ""}">${groupHtml}</div>`,
       );
       index = cursor;
       continue;
