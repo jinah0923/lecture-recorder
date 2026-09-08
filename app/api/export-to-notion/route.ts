@@ -104,6 +104,21 @@ function stripCalloutEmoji(line: string, emoji: string): string {
   return stripBlockquotePrefix(line.trim()).slice(emoji.length).trim();
 }
 
+// Matches lib/pdfExport.ts / lib/markdown.tsx's own table-row parsing —
+// same "| a | b |" syntax, same separator-row detection — so the three
+// renderers agree on what counts as a real table.
+function splitTableRow(line: string): string[] {
+  const trimmed = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+  return trimmed.split("|").map((cell) => cell.trim());
+}
+
+function isTableSeparatorRow(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("|") && !trimmed.includes("-")) return false;
+  const cells = splitTableRow(trimmed);
+  return cells.length > 0 && cells.every((cell) => /^:?-+:?$/.test(cell));
+}
+
 /**
  * Converts the app's lightweight lecture-note markdown (headings, bullets,
  * **bold**, and 🔥/💡/🗣️/💜 callout lines — see lib/markdown.tsx, the
@@ -154,12 +169,49 @@ function convertLectureNoteToBlocks(markdown: string, depth = 0): BlockObjectReq
       continue;
     }
 
-    if (line.startsWith("|")) {
-      if (/^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?$/.test(line)) {
-        index++;
-        continue; // table separator row
+    // Markdown table: a header row immediately followed by a "|---|---|"
+    // separator row. Notion has a real `table` block (with `table_row`
+    // children) for exactly this — unlike every other block type here,
+    // Notion requires a table's rows to be included as `table.children` in
+    // the very same request that creates the table, so this consumes the
+    // whole table up front rather than emitting it row by row.
+    if (line.startsWith("|") && index + 1 < lines.length && isTableSeparatorRow(lines[index + 1])) {
+      const headerCells = splitTableRow(line);
+      const tableWidth = headerCells.length;
+      const bodyRows: string[][] = [];
+      let cursor = index + 2;
+      while (cursor < lines.length && lines[cursor].trim().startsWith("|")) {
+        bodyRows.push(splitTableRow(lines[cursor]));
+        cursor++;
       }
-      const cells = line.replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
+      // Every row's cell count must equal table_width exactly or Notion
+      // rejects the whole request — pad/truncate defensively rather than
+      // trust the AI's output to be perfectly well-formed.
+      const toTableRow = (cells: string[]) => ({
+        type: "table_row" as const,
+        table_row: {
+          cells: Array.from({ length: tableWidth }, (_, cellIndex) => buildRichText(cells[cellIndex] ?? "")),
+        },
+      });
+      blocks.push({
+        type: "table",
+        table: {
+          table_width: tableWidth,
+          has_column_header: true,
+          has_row_header: false,
+          children: [headerCells, ...bodyRows].map(toTableRow),
+        },
+      });
+      index = cursor;
+      continue;
+    }
+
+    if (line.startsWith("|")) {
+      if (isTableSeparatorRow(line)) {
+        index++;
+        continue; // orphaned separator row (no header row before it) — skip
+      }
+      const cells = splitTableRow(line);
       blocks.push({
         type: "paragraph",
         paragraph: { rich_text: buildRichText(cells.join("  ·  ")) },
