@@ -32,12 +32,11 @@ function buildLectureNoteExportContent(aiResult: AiResult) {
 }
 
 function buildDraftBlockMarkdown(block: DraftBlock): string {
-  return [
-    `💜 **[AI 심화 탐구] ${block.title}**`,
-    `① 개념 정의: ${block.definition}`,
-    `② 심층 설명: ${block.deepDive}`,
-    `③ 실생활 예시: ${block.example}`,
-  ].join("\n");
+  // Blank line after the header ends the 💜 callout box (see the group-
+  // consuming loop in lib/markdown.tsx) so block.content renders below it as
+  // fully-parsed markdown — images/tables/headings included — rather than
+  // being swallowed as plain text inside the callout.
+  return [`💜 **[AI 심화 탐구] ${block.title}**`, "", block.content].join("\n");
 }
 
 function mergeConfirmedBlocks(lectureNote: string, blocks: DraftBlock[]): string {
@@ -119,9 +118,7 @@ export function ReviewPanel({
         sourceQuestion: question,
         anchorText: typeof data.anchorText === "string" ? data.anchorText : "",
         title: typeof data.title === "string" ? data.title : question,
-        definition: typeof data.definition === "string" ? data.definition : "",
-        deepDive: typeof data.deepDive === "string" ? data.deepDive : "",
-        example: typeof data.example === "string" ? data.example : "",
+        content: typeof data.content === "string" ? data.content : "",
         status: "pending",
       };
       setDraftBlocks((prev) =>

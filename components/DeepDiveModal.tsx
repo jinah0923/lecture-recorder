@@ -123,15 +123,7 @@ export function DeepDiveModal({
                     </div>
                   )}
                 </div>
-                <p className="text-sm text-violet-900 dark:text-violet-200">
-                  <strong>① 개념 정의</strong>: {block.definition}
-                </p>
-                <p className="mt-1 text-sm text-violet-900 dark:text-violet-200">
-                  <strong>② 심층 설명</strong>: {block.deepDive}
-                </p>
-                <p className="mt-1 text-sm text-violet-900 dark:text-violet-200">
-                  <strong>③ 실생활 예시</strong>: {block.example}
-                </p>
+                <div className="mt-1 rounded-lg bg-white/60 p-2.5 dark:bg-zinc-900/40">{renderMarkdown(block.content)}</div>
 
                 {feedbackOpenId === block.id && (
                   <div className="mt-2 flex gap-1.5">

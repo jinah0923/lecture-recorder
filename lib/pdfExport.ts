@@ -93,6 +93,10 @@ function isTableSeparatorRow(line: string): boolean {
 // this exact syntax.
 const SLIDE_IMAGE_PATTERN = /^!\[[^\]]*\]\(slide_(\d+)\)$/;
 
+// Matches lib/markdown.tsx's generic (non-slide) image pattern — an external
+// URL the AI cited for "AI 심화 탐구" (see app/api/expand-note/route.ts).
+const IMAGE_PATTERN = /^!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)$/;
+
 function renderMarkdownToHtml(markdown: string, slideImages?: Map<number, string>): string {
   const lines = markdown.split("\n");
   const blocks: string[] = [];
@@ -229,6 +233,16 @@ function renderMarkdownToHtml(markdown: string, slideImages?: Map<number, string
       continue;
     }
 
+    const imageMatch = line.match(IMAGE_PATTERN);
+    if (imageMatch) {
+      const [, alt, url] = imageMatch;
+      blocks.push(
+        `<div ${AVOID_BREAK_ATTR} style="${AVOID_BREAK_STYLE}margin:6px 0;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;"><img src="${escapeHtml(url)}" alt="${escapeHtml(alt)}" crossorigin="anonymous" style="display:block;width:100%;" />${alt ? `<p style="margin:0;padding:6px 10px;font-size:11px;color:#6b7280;border-top:1px solid #e5e7eb;">🖼️ ${escapeHtml(alt)}</p>` : ""}</div>`,
+      );
+      index++;
+      continue;
+    }
+
     const callout = detectCallout(line);
     if (callout) {
       // Greedily consume immediately-following plain lines into the same
@@ -241,6 +255,7 @@ function renderMarkdownToHtml(markdown: string, slideImages?: Map<number, string
         if (/^[-*•]\s+/.test(nextLine)) break;
         if (/^#{1,4}\s+/.test(nextLine)) break;
         if (nextLine.startsWith("|")) break;
+        if (SLIDE_IMAGE_PATTERN.test(nextLine) || IMAGE_PATTERN.test(nextLine)) break;
         if (detectCallout(nextLine)) break;
         groupLines.push(stripBlockquotePrefix(nextLine));
         cursor++;

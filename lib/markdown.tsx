@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { MarkdownImage } from "@/components/MarkdownImage";
 import { SlideImage } from "@/components/SlideImage";
 
 const CALLOUT_STYLES: Array<{ emoji: string; className: string }> = [
@@ -76,6 +77,12 @@ function isTableSeparatorRow(line: string): boolean {
 // image via `slideImages` (page number -> data URL), passed down from
 // wherever the reference PDF's pages were extracted (lib/pdfSlides.ts).
 const SLIDE_IMAGE_PATTERN = /^!\[[^\]]*\]\(slide_(\d+)\)$/;
+
+// General markdown image, e.g. an external reference image the AI cited for
+// "AI 심화 탐구" (see app/api/expand-note/route.ts) — distinct from the
+// slide-placeholder pattern above, which uses a local `slide_N` token
+// instead of a real URL.
+const IMAGE_PATTERN = /^!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)$/;
 
 export function renderMarkdown(markdown: string, slideImages?: Map<number, string>): ReactNode {
   const lines = markdown.split("\n");
@@ -252,6 +259,13 @@ export function renderMarkdown(markdown: string, slideImages?: Map<number, strin
       continue;
     }
 
+    const imageMatch = line.match(IMAGE_PATTERN);
+    if (imageMatch) {
+      blocks.push(<MarkdownImage key={index} alt={imageMatch[1]} src={imageMatch[2]} />);
+      index++;
+      continue;
+    }
+
     const callout = detectCallout(line);
     if (callout) {
       // Greedily consume immediately-following plain lines into the same
@@ -265,6 +279,7 @@ export function renderMarkdown(markdown: string, slideImages?: Map<number, strin
         if (/^[-*•]\s+/.test(nextLine)) break;
         if (/^#{1,4}\s+/.test(nextLine)) break;
         if (nextLine.startsWith("|")) break;
+        if (SLIDE_IMAGE_PATTERN.test(nextLine) || IMAGE_PATTERN.test(nextLine)) break;
         if (detectCallout(nextLine)) break;
         groupLines.push(stripBlockquotePrefix(nextLine));
         cursor++;

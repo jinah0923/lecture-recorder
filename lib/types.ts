@@ -96,8 +96,8 @@ export type DraftBlock = {
   sourceQuestion: string;
   anchorText: string;
   title: string;
-  definition: string;
-  deepDive: string;
-  example: string;
+  // Markdown body — free-form (headings/bullets/tables/images), not locked to
+  // a fixed 개념/설명/예시 structure. See app/api/expand-note/route.ts.
+  content: string;
   status: "pending" | "confirmed";
 };

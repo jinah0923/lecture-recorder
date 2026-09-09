@@ -17,11 +17,14 @@ const RESPONSE_SCHEMA = {
         "기존 강의노트 원문에 실제로 존재하는 문장/제목의 일부를 정확히 그대로 인용 (이 심화 내용이 삽입될 위치 바로 앞부분)",
     },
     title: { type: Type.STRING, description: "심화 탐구 블록의 짧은 제목" },
-    definition: { type: Type.STRING, description: "① 개념 정의" },
-    deepDive: { type: Type.STRING, description: "② 확장 심층 설명" },
-    example: { type: Type.STRING, description: "③ 쉬운 실생활 예시" },
+    content: {
+      type: Type.STRING,
+      description:
+        "심화 탐구 본문 (마크다운). 기본은 '① 개념 정의 ② 심층 설명 ③ 실생활 예시' 구조이지만 강제 규칙은 아니며, " +
+        "사진/그림/구조식이 필요하면 그 구조에 얽매이지 말고 마크다운 이미지(![설명](URL))를 적극 사용",
+    },
   },
-  required: ["anchorText", "title", "definition", "deepDive", "example"],
+  required: ["anchorText", "title", "content"],
 };
 
 function fixEscapedNewlines(text: string): string {
@@ -90,6 +93,13 @@ export async function POST(request: Request) {
     "반드시 지정된 JSON 스키마 형식으로만, 한국어로 응답하세요.",
     "질문과 무관한 내용을 지어내지 말고, 정확하고 교육적인 내용을 작성하세요.",
     "anchorText는 아래 제공된 기존 강의노트 원문에 실제로 존재하는 문장이나 제목의 일부를 정확히 그대로(요약하거나 바꿔쓰지 말고) 인용해야 합니다.",
+    "content는 마크다운 형식의 본문입니다. 기본적으로 '① 개념 정의', '② 심층 설명', '③ 실생활 예시' 세 부분으로 구성하되, " +
+      "이 3단 구조는 강제 규칙이 아니라 기본 골격일 뿐입니다.",
+    "사용자가 '사진', '그림', '구조식', '이미지', '표' 등 시각 자료를 명시적으로 요청한 경우에는 절대로 3단 텍스트 형식에 " +
+      "억지로 끼워맞추지 마세요. 대신 실제로 존재한다고 확신할 수 있는 신뢰할 만한 외부 이미지 URL(예: Wikipedia/Wikimedia " +
+      "Commons처럼 안정적인 직접 이미지 파일 URL)을 마크다운 이미지 문법 `![설명](https://실제-이미지-URL)`으로 본문에 적극 " +
+      "삽입하세요. 확신할 수 없는 URL을 지어내지는 말고, 그런 경우 어떤 자료를 찾아보면 좋을지 텍스트로 안내하세요.",
+    "비교·분류가 필요한 내용은 마크다운 표(`| ... | ... |` 문법)로 정리하세요.",
   ].join(" ");
 
   const userPrompt = [
@@ -100,11 +110,11 @@ export async function POST(request: Request) {
     question,
     "",
     "위 질문에 대해 아래 항목을 작성해주세요.",
-    "1. definition: 개념을 명확하고 간결하게 정의하세요.",
-    "2. deepDive: 배경, 원리, 관련 개념과의 관계 등을 포함한 확장된 심층 설명을 작성하세요.",
-    "3. example: 이해를 돕는 쉽고 구체적인 실생활 예시를 들어주세요.",
-    "4. title: 이 심화 탐구 블록의 짧은 제목을 지어주세요.",
-    "5. anchorText: 위 [기존 강의노트] 원문 안에서, 이 심화 내용이 삽입되기 가장 적합한 위치 바로 앞의 문장이나 제목을 원문 그대로 정확히 인용하세요.",
+    "1. content: 심화 탐구 본문을 마크다운으로 작성하세요. 기본은 ①개념 정의 ②심층 설명 ③실생활 예시 구조를 따르되, " +
+      "사진/그림/구조식 등 시각 자료가 필요한 질문이면 이 구조에 얽매이지 말고 신뢰할 수 있는 이미지 URL을 마크다운 " +
+      "이미지로 적극 첨부하고, 비교표가 필요하면 마크다운 표를 사용하세요.",
+    "2. title: 이 심화 탐구 블록의 짧은 제목을 지어주세요.",
+    "3. anchorText: 위 [기존 강의노트] 원문 안에서, 이 심화 내용이 삽입되기 가장 적합한 위치 바로 앞의 문장이나 제목을 원문 그대로 정확히 인용하세요.",
   ].join("\n");
 
   console.log("[expand-note] calling Gemini", {
@@ -149,9 +159,7 @@ export async function POST(request: Request) {
   let parsed: {
     anchorText?: unknown;
     title?: unknown;
-    definition?: unknown;
-    deepDive?: unknown;
-    example?: unknown;
+    content?: unknown;
   };
   try {
     parsed = JSON.parse(responseText);
@@ -162,8 +170,6 @@ export async function POST(request: Request) {
   return NextResponse.json({
     anchorText: typeof parsed.anchorText === "string" ? fixEscapedNewlines(parsed.anchorText.trim()) : "",
     title: typeof parsed.title === "string" ? fixEscapedNewlines(parsed.title.trim()) : question,
-    definition: typeof parsed.definition === "string" ? fixEscapedNewlines(parsed.definition.trim()) : "",
-    deepDive: typeof parsed.deepDive === "string" ? fixEscapedNewlines(parsed.deepDive.trim()) : "",
-    example: typeof parsed.example === "string" ? fixEscapedNewlines(parsed.example.trim()) : "",
+    content: typeof parsed.content === "string" ? fixEscapedNewlines(parsed.content.trim()) : "",
   });
 }

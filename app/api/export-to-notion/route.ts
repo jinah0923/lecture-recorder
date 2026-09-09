@@ -272,6 +272,20 @@ function convertLectureNoteToBlocks(markdown: string, depth = 0): BlockObjectReq
       continue;
     }
 
+    // A general markdown image (e.g. an external reference image the AI
+    // cited for "AI 심화 탐구" — see app/api/expand-note/route.ts), unlike
+    // the slide placeholder above, points at a real externally-hosted URL,
+    // which Notion's `image` block can embed directly via `external.url`.
+    const imageMatch = line.match(/^!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)$/);
+    if (imageMatch) {
+      blocks.push({
+        type: "image",
+        image: { type: "external", external: { url: imageMatch[2] } },
+      });
+      index++;
+      continue;
+    }
+
     const calloutEmoji = detectCalloutEmoji(line);
     if (calloutEmoji) {
       blocks.push({
