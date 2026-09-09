@@ -256,7 +256,7 @@ export function ReviewPanel({
               onKeyDown={(event) => {
                 if (event.key === "Enter") handleRequestExpansion();
               }}
-              placeholder="[개념 정의 / 확장 설명 / 쉬운 예시] 예: 루비스코 효소의 작용 원리와 쉬운 비유"
+              placeholder="[누락 내용 추가 / 심화 개념 / 구조식 요청] 예: 전사 과정 중 스플라이싱 내용이 빠졌어, 표 형태로 정리해서 추가해 줘."
               disabled={!aiResult.lectureNote}
               className="flex-1 rounded-lg border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-900 outline-none focus:border-indigo-300 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
             />
