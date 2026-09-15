@@ -48,16 +48,26 @@ function renderInline(text: string): ReactNode[] {
   const parts = text.split(/(\*\*[^*]+\*\*)/g);
   return parts.map((part, index) => {
     if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
-      return <strong key={index}>{part.slice(2, -2)}</strong>;
+      return (
+        <strong key={index} className="font-bold text-zinc-900 dark:text-zinc-100">
+          {part.slice(2, -2)}
+        </strong>
+      );
     }
     return <span key={index}>{part}</span>;
   });
 }
 
+// Notion-style heading hierarchy — each level's size/weight/margin step down
+// together so a section break (h1/h2) reads as a clear visual boundary, not
+// just slightly bigger text. h1 goes all the way to pure white in dark mode
+// (rather than zinc-100 like h2) so it unambiguously outranks everything
+// below it.
 function headingClassName(level: number) {
-  if (level === 1) return "text-base font-semibold text-zinc-900 dark:text-zinc-100";
-  if (level === 2) return "text-sm font-semibold text-zinc-900 dark:text-zinc-100";
-  return "text-sm font-medium text-zinc-700 dark:text-zinc-300";
+  if (level === 1) return "text-2xl font-extrabold mt-7 mb-3 text-zinc-900 dark:text-white";
+  if (level === 2) return "text-xl font-bold mt-6 mb-2.5 text-zinc-900 dark:text-zinc-100";
+  if (level === 3) return "text-lg font-semibold mt-4 mb-2 text-zinc-800 dark:text-zinc-200";
+  return "text-base font-semibold mt-3 mb-1.5 text-zinc-700 dark:text-zinc-300";
 }
 
 function splitTableRow(line: string): string[] {
@@ -84,52 +94,89 @@ const SLIDE_IMAGE_PATTERN = /^!\[[^\]]*\]\(slide_(\d+)\)$/;
 // instead of a real URL.
 const IMAGE_PATTERN = /^!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)$/;
 
+type FlatListItem = { depth: number; ordered: boolean; text: string };
+type ListNode = FlatListItem & { children: ListNode[] };
+
+// Turns a flat, depth-tagged run of list lines into a proper tree — each
+// item's children are whatever immediately-following items sit at a
+// strictly greater depth, matching standard nested-markdown-list semantics.
+function buildListTree(items: FlatListItem[]): ListNode[] {
+  const roots: ListNode[] = [];
+  const stack: ListNode[] = [];
+
+  for (const item of items) {
+    const node: ListNode = { ...item, children: [] };
+    while (stack.length > 0 && stack[stack.length - 1].depth >= node.depth) {
+      stack.pop();
+    }
+    (stack.length === 0 ? roots : stack[stack.length - 1].children).push(node);
+    stack.push(node);
+  }
+  return roots;
+}
+
+// Renders a tree level as one or more <ul>/<ol> — split into separate lists
+// wherever the ordered/unordered marker changes, so e.g. a bullet list
+// followed by a numbered list (both at the same depth) render as two
+// distinct lists rather than one mismatched tag. A callout-styled item (see
+// detectCallout) renders as its own bordered box instead of a plain <li>,
+// consistent with how a standalone callout line renders outside a list.
+function renderListNodes(nodes: ListNode[], keyPrefix: string): ReactNode[] {
+  const output: ReactNode[] = [];
+  let runStart = 0;
+  while (runStart < nodes.length) {
+    const ordered = nodes[runStart].ordered;
+    let runEnd = runStart;
+    while (runEnd < nodes.length && nodes[runEnd].ordered === ordered) runEnd++;
+    const run = nodes.slice(runStart, runEnd);
+    const Tag = ordered ? "ol" : "ul";
+    const runKey = `${keyPrefix}-${runStart}`;
+    output.push(
+      <Tag
+        key={runKey}
+        className={`${ordered ? "list-decimal" : "list-disc"} ml-1 space-y-2 pl-5 marker:text-zinc-400 dark:marker:text-zinc-500`}
+      >
+        {run.map((node, itemIndex) => {
+          const itemKey = `${runKey}-${itemIndex}`;
+          const callout = detectCallout(node.text);
+          const nestedList = node.children.length > 0 && (
+            <div className="mt-2">{renderListNodes(node.children, itemKey)}</div>
+          );
+          if (callout) {
+            return (
+              <li key={itemIndex} className="list-none -ml-5">
+                <div className={`my-4 rounded-lg border px-3 py-2 text-sm leading-[1.7] ${callout.className}`}>
+                  {renderInline(stripBlockquotePrefix(node.text))}
+                </div>
+                {nestedList}
+              </li>
+            );
+          }
+          return (
+            <li key={itemIndex} className="text-sm leading-[1.7] text-zinc-700 dark:text-zinc-300">
+              {renderInline(node.text)}
+              {nestedList}
+            </li>
+          );
+        })}
+      </Tag>,
+    );
+    runStart = runEnd;
+  }
+  return output;
+}
+
 export function renderMarkdown(markdown: string, slideImages?: Map<number, string>): ReactNode {
   const lines = markdown.split("\n");
   const blocks: ReactNode[] = [];
-  let listBuffer: string[] = [];
+  let listBuffer: FlatListItem[] = [];
   let index = 0;
 
   function flushList(key: string) {
     if (listBuffer.length === 0) return;
     const items = listBuffer;
     listBuffer = [];
-
-    if (items.some((item) => detectCallout(item))) {
-      blocks.push(
-        <div key={`list-${key}`} className="flex flex-col gap-1.5">
-          {items.map((item, itemIndex) => {
-            const callout = detectCallout(item);
-            if (callout) {
-              return (
-                <div
-                  key={itemIndex}
-                  className={`rounded-lg border px-3 py-2 text-sm ${callout.className}`}
-                >
-                  {renderInline(item)}
-                </div>
-              );
-            }
-            return (
-              <ul key={itemIndex} className="ml-4 list-disc">
-                <li className="text-sm text-zinc-700 dark:text-zinc-300">{renderInline(item)}</li>
-              </ul>
-            );
-          })}
-        </div>,
-      );
-      return;
-    }
-
-    blocks.push(
-      <ul key={`ul-${key}`} className="ml-4 list-disc space-y-1">
-        {items.map((item, itemIndex) => (
-          <li key={itemIndex} className="text-sm text-zinc-700 dark:text-zinc-300">
-            {renderInline(item)}
-          </li>
-        ))}
-      </ul>,
-    );
+    blocks.push(<div key={`list-${key}`}>{renderListNodes(buildListTree(items), `list-${key}`)}</div>);
   }
 
   while (index < lines.length) {
@@ -232,8 +279,15 @@ export function renderMarkdown(markdown: string, slideImages?: Map<number, strin
     }
 
     const bulletMatch = line.match(/^[-*•]\s+(.*)$/);
-    if (bulletMatch) {
-      listBuffer.push(bulletMatch[1]);
+    const orderedMatch = line.match(/^\d+[.)]\s+(.*)$/);
+    if (bulletMatch || orderedMatch) {
+      // Depth is read from the original (untrimmed) line's leading
+      // whitespace — `line` above has already had it stripped — so a
+      // sub-bullet indented under its parent renders as an actual nested
+      // list rather than flattening into the same level.
+      const leadingSpaces = rawLine.length - rawLine.trimStart().length;
+      const depth = Math.floor(leadingSpaces / 2);
+      listBuffer.push({ depth, ordered: !!orderedMatch, text: (bulletMatch ?? orderedMatch)![1] });
       index++;
       continue;
     }
@@ -243,7 +297,7 @@ export function renderMarkdown(markdown: string, slideImages?: Map<number, strin
     if (headingMatch) {
       const level = headingMatch[1].length;
       blocks.push(
-        <p key={index} className={`mt-3 first:mt-0 ${headingClassName(level)}`}>
+        <p key={index} className={`first:mt-0 ${headingClassName(level)}`}>
           {renderInline(headingMatch[2])}
         </p>,
       );
@@ -277,6 +331,7 @@ export function renderMarkdown(markdown: string, slideImages?: Map<number, strin
         const nextLine = lines[cursor].trim();
         if (!nextLine) break;
         if (/^[-*•]\s+/.test(nextLine)) break;
+        if (/^\d+[.)]\s+/.test(nextLine)) break;
         if (/^#{1,4}\s+/.test(nextLine)) break;
         if (nextLine.startsWith("|")) break;
         if (SLIDE_IMAGE_PATTERN.test(nextLine) || IMAGE_PATTERN.test(nextLine)) break;
@@ -285,7 +340,7 @@ export function renderMarkdown(markdown: string, slideImages?: Map<number, strin
         cursor++;
       }
       blocks.push(
-        <div key={index} className={`flex flex-col gap-1 rounded-lg border px-3 py-2 text-sm ${callout.className}`}>
+        <div key={index} className={`my-4 flex flex-col gap-1 rounded-lg border px-3 py-2 text-sm leading-[1.7] ${callout.className}`}>
           {groupLines.map((groupLine, groupIndex) => (
             <p key={groupIndex}>{renderInline(groupLine)}</p>
           ))}
