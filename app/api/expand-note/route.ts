@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { ApiError, GoogleGenAI, Type } from "@google/genai";
+import { ApiError, GoogleGenAI, Type, createPartFromBase64, createUserContent } from "@google/genai";
+import type { Part } from "@google/genai";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -7,6 +8,11 @@ export const maxDuration = 60;
 const MODEL = "gemini-3.6-flash";
 const MAX_NOTE_LENGTH = 20_000;
 const MAX_QUESTION_LENGTH = 500;
+// Comfortably under Gemini's ~20MB total inline-request ceiling — this is a
+// single attached photo (chemical structure, slide, handwriting), not a
+// multi-file upload, so it's sent inline as base64 rather than through the
+// Files API's upload/poll-for-ACTIVE dance used for audio/reference docs.
+const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 
 const RESPONSE_SCHEMA = {
   type: Type.OBJECT,
@@ -40,6 +46,43 @@ function fixEscapedNewlines(text: string): string {
   return text.replace(/\\n/g, "\n");
 }
 
+// Restricts server-side image fetches to this app's own image proxy route
+// (app/api/deep-dive-image/route.ts — see lib/blobUpload.ts's
+// buildDeepDiveImageProxyUrl for why the client wraps the URL that way)
+// rather than letting this route fetch an arbitrary attacker-supplied URL on
+// the server's behalf. That route independently re-validates its own `url`
+// param against the actual Blob store's hostname before it will serve
+// anything, so this only needs to confirm the request is headed there.
+function isAllowedImageUrl(rawUrl: string, requestOrigin: string): boolean {
+  try {
+    const parsed = new URL(rawUrl);
+    return parsed.origin === requestOrigin && parsed.pathname === "/api/deep-dive-image" && parsed.searchParams.has("url");
+  } catch {
+    return false;
+  }
+}
+
+// Downloads the learner's attached photo (already uploaded to Vercel Blob
+// and wrapped in our own public proxy URL — see lib/blobUpload.ts) and
+// inlines it as base64. Gemini has no way to dereference an arbitrary
+// external URL itself, so the bytes have to be fetched and attached
+// directly — the URL is passed separately in the text prompt below so the
+// model can echo it back verbatim in its markdown output instead of
+// inventing a new one.
+async function fetchImageAsPart(url: string): Promise<Part> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`첨부한 이미지를 불러오지 못했습니다 (HTTP ${response.status}).`);
+  }
+  const contentType = response.headers.get("content-type") || "image/jpeg";
+  const buffer = await response.arrayBuffer();
+  if (buffer.byteLength > MAX_IMAGE_BYTES) {
+    throw new Error("첨부한 이미지가 너무 큽니다.");
+  }
+  const base64 = Buffer.from(buffer).toString("base64");
+  return createPartFromBase64(base64, contentType);
+}
+
 function describeGeminiError(error: unknown): string {
   if (error instanceof ApiError) {
     if (error.status === 404) {
@@ -66,7 +109,7 @@ export async function POST(request: Request) {
     );
   }
 
-  let body: { lectureNote?: unknown; question?: unknown };
+  let body: { lectureNote?: unknown; question?: unknown; imageUrl?: unknown };
   try {
     body = await request.json();
   } catch {
@@ -75,6 +118,7 @@ export async function POST(request: Request) {
 
   const lectureNote = typeof body.lectureNote === "string" ? body.lectureNote.trim() : "";
   const question = typeof body.question === "string" ? body.question.trim() : "";
+  const imageUrl = typeof body.imageUrl === "string" ? body.imageUrl.trim() : "";
 
   if (!lectureNote) {
     return NextResponse.json(
@@ -93,6 +137,21 @@ export async function POST(request: Request) {
       { error: `질문은 ${MAX_QUESTION_LENGTH}자 이내로 입력해주세요.` },
       { status: 400 },
     );
+  }
+  if (imageUrl && !isAllowedImageUrl(imageUrl, new URL(request.url).origin)) {
+    return NextResponse.json({ error: "유효하지 않은 이미지 URL입니다." }, { status: 400 });
+  }
+
+  let imagePart: Part | null = null;
+  if (imageUrl) {
+    try {
+      imagePart = await fetchImageAsPart(imageUrl);
+    } catch (error) {
+      return NextResponse.json(
+        { error: error instanceof Error ? error.message : "첨부한 이미지를 처리하지 못했습니다." },
+        { status: 502 },
+      );
+    }
   }
 
   const ai = new GoogleGenAI({ apiKey });
@@ -115,9 +174,17 @@ export async function POST(request: Request) {
       "있는 신뢰할 만한 외부 이미지 URL(예: Wikipedia/Wikimedia Commons처럼 안정적인 직접 이미지 파일 URL)을 마크다운 " +
       "이미지 문법 `![설명](https://실제-이미지-URL)`으로 본문에 적극 삽입하세요. 확신할 수 없는 URL을 지어내지는 말고, " +
       "그런 경우 어떤 자료를 찾아보면 좋을지 텍스트로 안내하세요.",
+    imagePart
+      ? "학습자가 이미지(사진)를 직접 첨부했습니다. 이 이미지의 내용(화학 구조식, 슬라이드 도표, 손글씨 메모 등)을 " +
+        "자세히 분석해서 학습자의 질문에 답하는 설명을 작성하세요. 아래 [학습자가 첨부한 이미지]에 제공된 정확한 " +
+        "URL을 content 안에서 정확히 그대로 사용해 마크다운 이미지 문법 `![설명](그 URL)`으로 본문 적절한 위치에 " +
+        "삽입하세요 — 이 URL을 절대 변형하거나 다른 URL로 대체하지 마세요."
+      : "",
     "비교·분류가 필요한 내용은 마크다운 표(`| ... | ... |` 문법)로 정리하세요.",
     LATEX_BAN_RULE,
-  ].join(" ");
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   const userPrompt = [
     "[기존 강의노트]",
@@ -126,6 +193,15 @@ export async function POST(request: Request) {
     "[학습자의 요청]",
     question,
     "",
+    ...(imagePart
+      ? [
+          "[학습자가 첨부한 이미지]",
+          "이 이미지의 실제 URL: " + imageUrl,
+          "(이 이미지는 이 텍스트 프롬프트 바로 다음에 별도 파일로 함께 첨부되어 있습니다. 이미지 내용을 분석해 " +
+            "설명에 반영하고, content 안에서 이 이미지를 가리킬 때는 반드시 위 URL을 정확히 그대로 사용하세요.)",
+          "",
+        ]
+      : []),
     "위 요청의 의도(누락 내용 추가 / 기존 설명 보완·수정 / 특정 양식으로 변환 / 심화 개념 확장 등)를 먼저 파악한 뒤, " +
       "아래 항목을 작성해주세요.",
     "1. content: 요청 의도에 맞는 완성형 마크다운 블록을 작성하세요. '① 개념 정의 ② 심층 설명 ③ 실생활 예시' 같은 " +
@@ -140,13 +216,14 @@ export async function POST(request: Request) {
     model: MODEL,
     lectureNoteChars: lectureNote.length,
     questionChars: question.length,
+    hasImage: imagePart !== null,
   });
 
   let responseText: string | undefined;
   try {
     const response = await ai.models.generateContent({
       model: MODEL,
-      contents: userPrompt,
+      contents: imagePart ? createUserContent([userPrompt, imagePart]) : userPrompt,
       config: {
         systemInstruction,
         responseMimeType: "application/json",

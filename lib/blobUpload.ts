@@ -30,3 +30,18 @@ export async function uploadFileToBlob(
   });
   return { url: result.url, fileName, mimeType: result.contentType || mimeType };
 }
+
+// "AI 심화 탐구" image attachments (see components/ReviewPanel.tsx) reuse
+// uploadFileToBlob above (private access — this project's Blob store was
+// provisioned private-only and rejects access:"public" uploads outright).
+// Unlike the audio/reference uploads, though, this URL needs to stay
+// resolvable forever afterward — the AI embeds it as a markdown image in the
+// note, later rendered by the viewer's own browser and by Notion's server
+// when exporting, and neither can authenticate to fetch a private blob
+// directly. This wraps the raw private URL in our own public proxy route
+// (app/api/deep-dive-image/route.ts), which holds the BLOB_READ_WRITE_TOKEN
+// server-side and streams the bytes out to anyone — the private URL itself
+// stays opaque to the outside world either way (a bare fetch of it 403s).
+export function buildDeepDiveImageProxyUrl(blobUrl: string): string {
+  return `${window.location.origin}/api/deep-dive-image?url=${encodeURIComponent(blobUrl)}`;
+}

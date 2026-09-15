@@ -1,15 +1,18 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState, type ChangeEvent, type ClipboardEvent } from "react";
 import { ChecklistPanel } from "@/components/ChecklistPanel";
 import { DeepDiveModal } from "@/components/DeepDiveModal";
 import { LectureNote } from "@/components/LectureNote";
 import { NotionExportModal } from "@/components/NotionExportModal";
 import { PdfExportModal } from "@/components/PdfExportModal";
 import { TranscriptPanel } from "@/components/TranscriptPanel";
+import { buildDeepDiveImageProxyUrl, uploadFileToBlob } from "@/lib/blobUpload";
 import { copyToClipboard, downloadTextFile } from "@/lib/export";
 import { renderMarkdown } from "@/lib/markdown";
 import type { AiResult, ChecklistItem, DraftBlock, TranscriptSegment } from "@/lib/types";
+
+type AttachedImage = { file: File; previewUrl: string };
 
 type ReviewPanelProps = {
   title: string;
@@ -70,12 +73,23 @@ export function ReviewPanel({
   const [noteCopyLabel, setNoteCopyLabel] = useState("클립보드 복사");
 
   const [expandQuestion, setExpandQuestion] = useState("");
+  const [expandImage, setExpandImage] = useState<AttachedImage | null>(null);
   const [isExpanding, setIsExpanding] = useState(false);
   const [expandError, setExpandError] = useState<string | null>(null);
   const [draftBlocks, setDraftBlocks] = useState<DraftBlock[]>([]);
   const [showModal, setShowModal] = useState(false);
   const [showNotionModal, setShowNotionModal] = useState(false);
   const [showPdfModal, setShowPdfModal] = useState(false);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+
+  // Revokes the previous preview's object URL whenever it's replaced or the
+  // component unmounts — doesn't affect the underlying File (still fully
+  // readable for upload) since object URLs are display-only handles.
+  useEffect(() => {
+    return () => {
+      if (expandImage) URL.revokeObjectURL(expandImage.previewUrl);
+    };
+  }, [expandImage]);
 
   async function handleCopySummary() {
     const ok = await copyToClipboard(buildSummaryExportContent(aiResult));
@@ -99,15 +113,30 @@ export function ReviewPanel({
     downloadTextFile(`lecture-note.${extension}`, buildLectureNoteExportContent(aiResult), mime);
   }
 
-  async function requestExpansion(question: string, replaceBlockId?: string) {
+  async function requestExpansion(question: string, replaceBlockId?: string, imageFile?: File) {
     if (!question.trim()) return;
     setIsExpanding(true);
     setExpandError(null);
     try {
+      let imageUrl: string | undefined;
+      if (imageFile) {
+        // This project's Blob store is private-only, so the raw upload URL
+        // 403s for anyone without our server's token — buildDeepDiveImageProxyUrl
+        // wraps it in our own public proxy route (app/api/deep-dive-image)
+        // instead, which is what actually needs to survive permanently in the
+        // merged lecture note (rendered later by the viewer's browser and by
+        // Notion's server, neither of which can authenticate to Blob directly).
+        const uploaded = await uploadFileToBlob(
+          imageFile,
+          imageFile.name || `deep-dive-${Date.now()}.jpg`,
+          imageFile.type || "image/jpeg",
+        );
+        imageUrl = buildDeepDiveImageProxyUrl(uploaded.url);
+      }
       const response = await fetch("/api/expand-note", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ lectureNote: aiResult.lectureNote, question }),
+        body: JSON.stringify({ lectureNote: aiResult.lectureNote, question, ...(imageUrl ? { imageUrl } : {}) }),
       });
       const data = await response.json();
       if (!response.ok) {
@@ -137,8 +166,35 @@ export function ReviewPanel({
   function handleRequestExpansion() {
     const question = expandQuestion.trim();
     if (!question) return;
-    void requestExpansion(question);
+    const imageFile = expandImage?.file;
+    void requestExpansion(question, undefined, imageFile);
     setExpandQuestion("");
+    setExpandImage(null);
+  }
+
+  function handleImageSelected(file: File) {
+    setExpandImage({ file, previewUrl: URL.createObjectURL(file) });
+    if (expandError) setExpandError(null);
+  }
+
+  function handleImageInputChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = ""; // allow re-selecting the same file next time
+    if (file) handleImageSelected(file);
+  }
+
+  function handleQuestionPaste(event: ClipboardEvent<HTMLInputElement>) {
+    const items = event.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (!item.type.startsWith("image/")) continue;
+      const file = item.getAsFile();
+      if (file) {
+        event.preventDefault();
+        handleImageSelected(file);
+      }
+      break;
+    }
   }
 
   function handleConfirmBlock(id: string) {
@@ -246,7 +302,42 @@ export function ReviewPanel({
 
         <div className="mt-3 border-t border-zinc-100 pt-3 dark:border-zinc-800">
           <p className="mb-1.5 text-xs font-medium text-zinc-500 dark:text-zinc-400">🔍 더 알고 싶은 심화정보 / 추가 질문</p>
+          {expandImage && (
+            <div className="mb-1.5 flex items-center gap-2 rounded-lg border border-slate-200 bg-white p-1.5 dark:border-zinc-700 dark:bg-zinc-800">
+              {/* eslint-disable-next-line @next/next/no-img-element -- local blob: object URL, not an optimizable remote asset */}
+              <img src={expandImage.previewUrl} alt="첨부 이미지 미리보기" className="h-12 w-12 shrink-0 rounded-md object-cover" />
+              <span className="min-w-0 flex-1 truncate text-xs text-zinc-500 dark:text-zinc-400">{expandImage.file.name}</span>
+              <button
+                type="button"
+                onClick={() => setExpandImage(null)}
+                aria-label="첨부 이미지 제거"
+                title="첨부 이미지 제거"
+                className="shrink-0 rounded-full p-1 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+              >
+                <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M6 6l12 12M18 6L6 18" strokeLinecap="round" />
+                </svg>
+              </button>
+            </div>
+          )}
           <div className="flex gap-1.5">
+            <input
+              ref={imageInputRef}
+              type="file"
+              accept="image/*"
+              onChange={handleImageInputChange}
+              className="hidden"
+            />
+            <button
+              type="button"
+              onClick={() => imageInputRef.current?.click()}
+              disabled={!aiResult.lectureNote}
+              aria-label="이미지 첨부"
+              title="이미지 첨부 (사진/구조식/도표)"
+              className="shrink-0 rounded-lg border border-slate-200 px-2.5 text-base text-zinc-500 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
+            >
+              📎
+            </button>
             <input
               value={expandQuestion}
               onChange={(event) => {
@@ -256,6 +347,7 @@ export function ReviewPanel({
               onKeyDown={(event) => {
                 if (event.key === "Enter") handleRequestExpansion();
               }}
+              onPaste={handleQuestionPaste}
               placeholder="[누락 내용 추가 / 심화 개념 / 구조식 요청] 예: 전사 과정 중 스플라이싱 내용이 빠졌어, 표 형태로 정리해서 추가해 줘."
               disabled={!aiResult.lectureNote}
               className="flex-1 rounded-lg border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-900 outline-none focus:border-indigo-300 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
@@ -270,7 +362,8 @@ export function ReviewPanel({
             </button>
           </div>
           <p className="mt-1.5 text-[11px] text-zinc-400 dark:text-zinc-500">
-            💡 강의 내용 중 보강하고 싶은 학술 개념, 심층 원리, 실생활 예시를 입력하면 강의노트의 적절한 위치에 제안 블록을 생성합니다.
+            💡 강의 내용 중 보강하고 싶은 학술 개념, 심층 원리, 실생활 예시를 입력하거나 사진(구조식/도표)을 첨부하면
+            강의노트의 적절한 위치에 제안 블록을 생성합니다. 이미지는 붙여넣기(Ctrl+V)로도 첨부할 수 있습니다.
           </p>
           {expandError && <p className="mt-1.5 text-xs text-red-600 dark:text-red-400">{expandError}</p>}
           {draftBlocks.length > 0 && !showModal && (
