@@ -488,7 +488,11 @@ export function RecordingDetailView({
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center text-sm text-zinc-400 dark:text-zinc-500">
         <p>녹음을 찾을 수 없습니다.</p>
-        <button type="button" onClick={onBack} className="text-indigo-600 underline dark:text-indigo-400">
+        <button
+          type="button"
+          onClick={onBack}
+          className="inline-flex min-h-[44px] items-center px-1 text-indigo-600 underline dark:text-indigo-400"
+        >
           목록으로 돌아가기
         </button>
       </div>
@@ -501,7 +505,7 @@ export function RecordingDetailView({
         <button
           type="button"
           onClick={onBack}
-          className="mb-3 inline-flex items-center gap-1 text-sm font-medium text-zinc-600 transition hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+          className="-ml-1 mb-2 inline-flex min-h-[44px] items-center gap-1 px-1 text-sm font-medium text-zinc-600 transition hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
         >
           <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
             <path d="M15 18l-6-6 6-6" strokeLinecap="round" strokeLinejoin="round" />

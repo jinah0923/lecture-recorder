@@ -57,6 +57,29 @@ body {
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
+/* iPadOS Split View / Slide Over floats a system multitasking pill ("...")
+   near the top-center of the window — unlike a notch/Dynamic Island, this
+   is a windowing affordance, not a display cutout, so it is NEVER reported
+   through env(safe-area-inset-top) (confirmed: that stays 0 in Split View).
+   A plain top-anchored header has nothing to react to there, so this
+   guarantees a real minimum instead — max() so a device that separately
+   reports a genuine safe-area inset (rounded corners, a landscape notch)
+   still gets whichever is larger, never double-counted with the floor.
+   Viewport width is the only usable proxy for "probably a tablet-width
+   window" (a phone in full-screen portrait is reliably under 640px; even a
+   narrow-but-usable iPad Split View pane for this app's fairly dense layout
+   isn't), so the floor only steps up past that breakpoint — a plain phone
+   doesn't need the extra space and it would just look like a gap there. */
+.header-safe-pt {
+  padding-top: max(env(safe-area-inset-top, 0px), 1rem);
+}
+
+@media (min-width: 640px) {
+  .header-safe-pt {
+    padding-top: max(env(safe-area-inset-top, 0px), 1.75rem);
+  }
+}
+
 @keyframes pulse-dot {
   0%,
   100% {
