@@ -7,17 +7,27 @@ import { AlbumView } from "@/components/AlbumView";
 import { CategoryListView } from "@/components/CategoryListView";
 import { NewRecordingView } from "@/components/NewRecordingView";
 import { RecordingDetailView } from "@/components/RecordingDetailView";
+import { TrashModal } from "@/components/TrashModal";
 import { WeeklyChecklist } from "@/components/WeeklyChecklist";
+import { purgeSessionBlobs } from "@/lib/blobUpload";
 import {
-  deleteSession,
   listAllChecklistItems,
+  listDeletedSessions,
   listSessions,
   loadCategories,
+  permanentlyDeleteSession,
+  purgeExpiredTrash,
+  restoreSession,
   saveCategories,
+  softDeleteSession,
   toggleSessionChecklistItem,
 } from "@/lib/db";
 import { mergeAndSync, pushLocalSessions } from "@/lib/sync";
-import type { ChecklistFeedItem, LectureSessionSummary, SessionAudio } from "@/lib/types";
+import type { ChecklistFeedItem, LectureSession, LectureSessionSummary, SessionAudio } from "@/lib/types";
+
+function blobCleanupTexts(sessions: Array<LectureSession | null>): string[] {
+  return sessions.flatMap((session) => (session?.aiResult ? [session.aiResult.lectureNote, session.aiResult.summary] : []));
+}
 
 type Screen =
   | { kind: "albums" }
@@ -31,10 +41,12 @@ export function LectureStudio() {
   const screen = screenStack[screenStack.length - 1];
 
   const [sessions, setSessions] = useState<LectureSessionSummary[]>([]);
+  const [trashedSessions, setTrashedSessions] = useState<LectureSessionSummary[]>([]);
   const [categories, setCategories] = useState<string[]>(["일반"]);
   const [checklistFeed, setChecklistFeed] = useState<ChecklistFeedItem[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [showAddCategory, setShowAddCategory] = useState(false);
+  const [showTrash, setShowTrash] = useState(false);
   const [handoffAudio, setHandoffAudio] = useState<{ sessionId: string; audio: SessionAudio } | null>(
     null,
   );
@@ -43,18 +55,37 @@ export function LectureStudio() {
     listSessions().then(setSessions).catch(() => {});
   }, []);
 
+  const refreshTrash = useCallback(() => {
+    listDeletedSessions().then(setTrashedSessions).catch(() => {});
+  }, []);
+
   const refreshChecklistFeed = useCallback(() => {
     listAllChecklistItems().then(setChecklistFeed).catch(() => {});
   }, []);
 
   const refreshAll = useCallback(() => {
     refreshSessions();
+    refreshTrash();
     refreshChecklistFeed();
     // The edit that triggered this refresh is already the newest version of
     // whatever changed, so this only needs to push it — pulling the cloud
     // first would just be a redundant round trip. See lib/sync.ts.
     if (authStatus === "authenticated") pushLocalSessions().catch(() => {});
-  }, [refreshSessions, refreshChecklistFeed, authStatus]);
+  }, [refreshSessions, refreshTrash, refreshChecklistFeed, authStatus]);
+
+  // Deletion needs a stronger guarantee than refreshAll's fire-and-forget
+  // push: the whole point of moving to trash is that it takes effect
+  // immediately and consistently on both sides, not "eventually, assuming
+  // the tab stays open long enough for the background push to land" — a
+  // refresh in that gap is exactly what used to bring a deleted session back
+  // (mergeAndSync's union merge would still see the old cloud copy and
+  // restore it locally). Awaiting the push here closes that window for the
+  // device doing the deleting; lib/sync.ts's own isTrashExpired check is
+  // what protects every other device against a stale copy of THIS session.
+  const syncNow = useCallback(async () => {
+    if (authStatus !== "authenticated") return;
+    await pushLocalSessions().catch(() => {});
+  }, [authStatus]);
 
   const handleCategoryCreated = useCallback((name: string) => {
     setCategories((prev) => {
@@ -66,32 +97,43 @@ export function LectureStudio() {
   }, []);
 
   useEffect(() => {
-    Promise.all([loadCategories(), listSessions(), listAllChecklistItems()]).then(
-      ([savedCategories, sessionList, checklist]) => {
-        if (savedCategories.length > 0) {
-          setCategories((prev) => Array.from(new Set([...prev, ...savedCategories])));
-        }
-        setSessions(sessionList);
-        setChecklistFeed(checklist);
-        setLoaded(true);
-      },
-    );
+    // Auto Purge — runs once up front so a trashed session past its 30-day
+    // retention never actually renders in the trash list, rather than
+    // waiting for someone to notice and clean it up manually.
+    purgeExpiredTrash().then((purged) => {
+      if (purged.length > 0) void purgeSessionBlobs(blobCleanupTexts(purged));
+      Promise.all([loadCategories(), listSessions(), listDeletedSessions(), listAllChecklistItems()]).then(
+        ([savedCategories, sessionList, trashList, checklist]) => {
+          if (savedCategories.length > 0) {
+            setCategories((prev) => Array.from(new Set([...prev, ...savedCategories])));
+          }
+          setSessions(sessionList);
+          setTrashedSessions(trashList);
+          setChecklistFeed(checklist);
+          setLoaded(true);
+        },
+      );
+    });
   }, []);
 
   // Runs whenever auth status resolves to "authenticated" — both right after
   // a fresh Google sign-in and on a later visit where this device is still
   // signed in — pulling whatever changed on other devices since last time
   // and merging it in. Local data above isn't gated on this; the screen
-  // refreshes once the merge lands.
+  // refreshes once the merge lands. mergeAndSync (lib/sync.ts) re-applies the
+  // same 30-day trash expiry during the merge itself, so a stale "not yet
+  // expired" copy from the cloud can't undo this device's own auto-purge
+  // above just because the two effects race.
   useEffect(() => {
     if (authStatus !== "authenticated") return;
     mergeAndSync()
       .then(() => {
         refreshSessions();
+        refreshTrash();
         refreshChecklistFeed();
       })
       .catch(() => {});
-  }, [authStatus, refreshSessions, refreshChecklistFeed]);
+  }, [authStatus, refreshSessions, refreshTrash, refreshChecklistFeed]);
 
   const categorySummaries = useMemo(() => {
     const map = new Map<string, { count: number; updatedAt: number }>();
@@ -132,8 +174,43 @@ export function LectureStudio() {
     navigateTo({ kind: "detail", sessionId: session.id });
   }
 
-  function handleDeleteSession(id: string) {
-    deleteSession(id).then(refreshAll).catch(() => {});
+  async function handleMoveToTrash(id: string) {
+    await softDeleteSession(id);
+    refreshSessions();
+    refreshTrash();
+    refreshChecklistFeed();
+    await syncNow();
+  }
+
+  async function handleRestoreSession(id: string) {
+    await restoreSession(id);
+    refreshSessions();
+    refreshTrash();
+    refreshChecklistFeed();
+    await syncNow();
+  }
+
+  async function handlePermanentDeleteSession(id: string) {
+    if (!window.confirm("이 녹음을 영구적으로 삭제할까요? 이 작업은 되돌릴 수 없습니다.")) return;
+    const removed = await permanentlyDeleteSession(id);
+    if (removed) void purgeSessionBlobs(blobCleanupTexts([removed]));
+    refreshTrash();
+    await syncNow();
+  }
+
+  async function handleEmptyTrash() {
+    if (trashedSessions.length === 0) return;
+    if (
+      !window.confirm(
+        `휴지통에 있는 ${trashedSessions.length}개 항목을 모두 영구 삭제할까요? 이 작업은 되돌릴 수 없습니다.`,
+      )
+    ) {
+      return;
+    }
+    const removed = await Promise.all(trashedSessions.map((session) => permanentlyDeleteSession(session.id)));
+    void purgeSessionBlobs(blobCleanupTexts(removed));
+    refreshTrash();
+    await syncNow();
   }
 
   function handleSubmitCategory(name: string) {
@@ -201,6 +278,8 @@ export function LectureStudio() {
               categories={categorySummaries}
               onSelectCategory={handleSelectCategory}
               onAddCategory={() => setShowAddCategory(true)}
+              onOpenTrash={() => setShowTrash(true)}
+              trashCount={trashedSessions.length}
             />
             <WeeklyChecklist
               items={checklistFeed}
@@ -215,7 +294,7 @@ export function LectureStudio() {
             category={screen.category}
             sessions={sessions.filter((session) => session.category === screen.category)}
             onSelectSession={handleSelectSession}
-            onDeleteSession={handleDeleteSession}
+            onDeleteSession={handleMoveToTrash}
             onNewRecording={() => handleNewRecording(screen.category)}
           />
         )}
@@ -255,6 +334,16 @@ export function LectureStudio() {
           existingCategories={categories}
           onSubmit={handleSubmitCategory}
           onClose={() => setShowAddCategory(false)}
+        />
+      )}
+
+      {showTrash && (
+        <TrashModal
+          items={trashedSessions}
+          onRestore={handleRestoreSession}
+          onPermanentDelete={handlePermanentDeleteSession}
+          onEmptyTrash={handleEmptyTrash}
+          onClose={() => setShowTrash(false)}
         />
       )}
     </div>

@@ -63,6 +63,12 @@ export function RecordingDetailView({
   const [durationMs, setDurationMs] = useState(0);
   const [audioFileName, setAudioFileName] = useState("");
   const [audioMimeType, setAudioMimeType] = useState("");
+  // Always null in practice — the list this view is reached from already
+  // filters out trashed sessions (see lib/db.ts's listSessions) — but still
+  // tracked and round-tripped here rather than hard-coded, so an autosave
+  // triggered by some other path can never silently clear a session's trash
+  // state just because this component doesn't know about it.
+  const [deletedAt, setDeletedAt] = useState<number | null>(null);
   const [aiResult, setAiResult] = useState<AiResult | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analyzeProgress, setAnalyzeProgress] = useState("");
@@ -118,6 +124,7 @@ export function RecordingDetailView({
       setDurationMs(session.durationMs);
       setAudioFileName(session.audioFileName);
       setAudioMimeType(session.audioMimeType);
+      setDeletedAt(session.deletedAt ?? null);
       setBookmarks(session.bookmarks);
       setKeywords(session.keywords ?? []);
       // A session saved before multi-file support only has the old singular
@@ -151,6 +158,7 @@ export function RecordingDetailView({
       durationMs,
       audioFileName,
       audioMimeType,
+      deletedAt,
       bookmarks,
       keywords,
       referenceFileNames,
@@ -165,6 +173,7 @@ export function RecordingDetailView({
       durationMs,
       audioFileName,
       audioMimeType,
+      deletedAt,
       bookmarks,
       keywords,
       referenceFileNames,

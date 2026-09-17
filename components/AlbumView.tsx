@@ -12,20 +12,31 @@ type AlbumViewProps = {
   categories: CategorySummary[];
   onSelectCategory: (name: string) => void;
   onAddCategory: () => void;
+  onOpenTrash: () => void;
+  trashCount: number;
 };
 
-export function AlbumView({ categories, onSelectCategory, onAddCategory }: AlbumViewProps) {
+export function AlbumView({ categories, onSelectCategory, onAddCategory, onOpenTrash, trashCount }: AlbumViewProps) {
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-2">
         <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">내 카테고리 앨범</h2>
-        <button
-          type="button"
-          onClick={onAddCategory}
-          className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500"
-        >
-          + 카테고리 추가
-        </button>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={onOpenTrash}
+            className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 px-3 py-2 text-sm font-medium text-zinc-600 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+          >
+            🗑️ 휴지통{trashCount > 0 ? ` (${trashCount})` : ""}
+          </button>
+          <button
+            type="button"
+            onClick={onAddCategory}
+            className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500"
+          >
+            + 카테고리 추가
+          </button>
+        </div>
       </div>
 
       {categories.length === 0 ? (

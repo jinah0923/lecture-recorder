@@ -45,3 +45,22 @@ export async function uploadFileToBlob(
 export function buildDeepDiveImageProxyUrl(blobUrl: string): string {
   return `${window.location.origin}/api/deep-dive-image?url=${encodeURIComponent(blobUrl)}`;
 }
+
+// Called when a session is permanently removed (see components/LectureStudio.tsx —
+// individual "영구 삭제", "휴지통 비우기", or the 30-day auto-purge) to clean
+// up any deep-dive image blobs only that session ever referenced. Best-effort
+// — the session row itself is already gone either way by the time this runs,
+// so a failed cleanup just means a small amount of orphaned Blob storage
+// rather than anything the user would notice.
+export async function purgeSessionBlobs(texts: string[]): Promise<void> {
+  if (texts.length === 0) return;
+  try {
+    await fetch("/api/purge-blobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ texts }),
+    });
+  } catch {
+    // non-critical — see comment above
+  }
+}

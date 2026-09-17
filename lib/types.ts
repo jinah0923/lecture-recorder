@@ -72,6 +72,15 @@ export type LectureSession = {
   keywords: string[];
   referenceFileNames: string[];
   aiResult: AiResult | null;
+  // Soft-delete marker (epoch ms) — null/undefined means active. A session
+  // moved to trash stays a full row in IndexedDB/Redis (see lib/db.ts,
+  // app/api/sync/route.ts) rather than being removed outright, specifically
+  // so the cross-device merge in lib/sync.ts has something to actually
+  // merge: a plain removal is invisible to a union-by-id merge (the other
+  // side just re-adds it), while a `deletedAt` bump is a normal field
+  // change that the existing "newest updatedAt wins" logic already handles
+  // correctly.
+  deletedAt: number | null;
 };
 
 export type LectureSessionSummary = {
@@ -81,6 +90,7 @@ export type LectureSessionSummary = {
   updatedAt: number;
   durationMs: number;
   hasAiResult: boolean;
+  deletedAt: number | null;
 };
 
 export type ChecklistFeedItem = ChecklistItem & {

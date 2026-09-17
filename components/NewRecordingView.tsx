@@ -60,6 +60,7 @@ export function NewRecordingView({
       keywords: [],
       referenceFileNames: [],
       aiResult: null,
+      deletedAt: null,
     };
 
     saveSession(session).then(() => {

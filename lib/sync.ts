@@ -1,6 +1,6 @@
 "use client";
 
-import { loadAllSessions, saveSession } from "@/lib/db";
+import { isTrashExpired, loadAllSessions, permanentlyDeleteSession, saveSession } from "@/lib/db";
 import type { LectureSession } from "@/lib/types";
 
 async function readErrorMessage(response: Response, fallback: string): Promise<string> {
@@ -58,9 +58,19 @@ function mergeSessionLists(local: LectureSession[], cloud: LectureSession[]): Le
 export async function mergeAndSync(): Promise<LectureSession[]> {
   const [local, cloud] = await Promise.all([loadAllSessions(), fetchCloudSessions()]);
   const merged = mergeSessionLists(local, cloud);
-  await Promise.all(merged.map((session) => saveSession(session)));
-  await pushCloudSessions(merged);
-  return merged;
+
+  // A trashed session past its 30-day retention has to be re-checked here,
+  // not just at load time — a stale "still within retention" copy of it
+  // sitting in the cloud (this device already purged its own local copy, or
+  // never even had it) would otherwise come back through the union merge
+  // above and effectively un-purge it.
+  const kept = merged.filter((session) => !isTrashExpired(session));
+  const expiredIds = new Set(merged.filter(isTrashExpired).map((session) => session.id));
+
+  await Promise.all(kept.map((session) => saveSession(session)));
+  await Promise.all(Array.from(expiredIds).map((id) => permanentlyDeleteSession(id)));
+  await pushCloudSessions(kept);
+  return kept;
 }
 
 // Lightweight one-way push used after a local edit — the edit just made is

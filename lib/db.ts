@@ -61,9 +61,74 @@ export async function loadSessionById(id: string): Promise<LectureSession | null
   return result ?? null;
 }
 
-export async function deleteSession(id: string): Promise<void> {
+// Soft delete — the everyday "delete" action (CategoryListView's trash icon)
+// moves a session to trash rather than removing it. See permanentlyDeleteSession
+// below for the real, irreversible removal (individual "영구 삭제" / "휴지통
+// 비우기" / the 30-day auto-purge in purgeExpiredTrash). Bumping updatedAt
+// alongside deletedAt is what makes this correctly win a cross-device merge
+// (lib/sync.ts) even against a stale "still active" copy from another
+// device that hasn't seen the deletion yet.
+export async function softDeleteSession(id: string): Promise<void> {
+  const session = await loadSessionById(id);
+  if (!session) return;
+  const now = Date.now();
+  await saveSession({ ...session, deletedAt: now, updatedAt: now });
+}
+
+export async function restoreSession(id: string): Promise<void> {
+  const session = await loadSessionById(id);
+  if (!session) return;
+  await saveSession({ ...session, deletedAt: null, updatedAt: Date.now() });
+}
+
+// Irreversible — actually removes the row (and its slide images) rather
+// than flagging it. Returns the removed session (if it existed) so the
+// caller can find and clean up anything that outlives the IndexedDB row
+// itself, e.g. the permanently-hosted "AI 심화 탐구" image blobs embedded
+// in aiResult.lectureNote (see lib/blobUpload.ts's purgeSessionBlobs and
+// app/api/purge-blobs/route.ts).
+export async function permanentlyDeleteSession(id: string): Promise<LectureSession | null> {
+  const session = await loadSessionById(id);
   await runTransaction(SESSION_STORE, "readwrite", (store) => store.delete(id));
   await deleteSlideImages(id);
+  return session;
+}
+
+export const TRASH_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+// Exported so lib/sync.ts's mergeAndSync can apply the same 30-day rule to a
+// session that comes back from the cloud during a merge — a plain "purge on
+// load" pass alone isn't enough, since a stale cloud copy of an
+// already-locally-purged session would otherwise get merged straight back in
+// (same class of resurrection bug deletedAt itself exists to fix, just for
+// the expiry case specifically).
+export function isTrashExpired(session: LectureSession): boolean {
+  return Boolean(session.deletedAt) && Date.now() - (session.deletedAt as number) > TRASH_RETENTION_MS;
+}
+
+// Sweeps every session that's been in trash for more than 30 days and
+// permanently removes it — the "Auto Purge" half of the trash feature.
+// Meant to be called wherever trashed sessions get read (app load, opening
+// the trash view) so an expired item never actually renders to the user,
+// rather than running on a schedule.
+export async function purgeExpiredTrash(): Promise<LectureSession[]> {
+  const all = await loadAllSessions();
+  const expired = all.filter(isTrashExpired);
+  await Promise.all(expired.map((session) => runTransaction(SESSION_STORE, "readwrite", (store) => store.delete(session.id))));
+  await Promise.all(expired.map((session) => deleteSlideImages(session.id)));
+  return expired;
+}
+
+function toSummary(row: LectureSession): LectureSessionSummary {
+  return {
+    id: row.id,
+    title: row.title,
+    category: row.category,
+    updatedAt: row.updatedAt,
+    durationMs: row.durationMs ?? 0,
+    hasAiResult: Boolean(row.aiResult),
+    deletedAt: row.deletedAt ?? null,
+  };
 }
 
 export async function listSessions(): Promise<LectureSessionSummary[]> {
@@ -75,15 +140,29 @@ export async function listSessions(): Promise<LectureSessionSummary[]> {
     request.onsuccess = () => {
       const rows = request.result as LectureSession[];
       const summaries = rows
-        .map((row) => ({
-          id: row.id,
-          title: row.title,
-          category: row.category,
-          updatedAt: row.updatedAt,
-          durationMs: row.durationMs ?? 0,
-          hasAiResult: Boolean(row.aiResult),
-        }))
+        .filter((row) => !row.deletedAt)
+        .map(toSummary)
         .sort((a, b) => b.updatedAt - a.updatedAt);
+      resolve(summaries);
+    };
+    request.onerror = () => reject(request.error);
+    tx.oncomplete = () => db.close();
+  });
+}
+
+// Trash view's own listing — the mirror image of listSessions() above.
+export async function listDeletedSessions(): Promise<LectureSessionSummary[]> {
+  const db = await openDb();
+  return new Promise<LectureSessionSummary[]>((resolve, reject) => {
+    const tx = db.transaction(SESSION_STORE, "readonly");
+    const store = tx.objectStore(SESSION_STORE);
+    const request = store.getAll();
+    request.onsuccess = () => {
+      const rows = request.result as LectureSession[];
+      const summaries = rows
+        .filter((row) => !!row.deletedAt)
+        .map(toSummary)
+        .sort((a, b) => (b.deletedAt ?? 0) - (a.deletedAt ?? 0));
       resolve(summaries);
     };
     request.onerror = () => reject(request.error);
@@ -115,7 +194,7 @@ export async function listAllChecklistItems(): Promise<ChecklistFeedItem[]> {
       const rows = request.result as LectureSession[];
       const items: ChecklistFeedItem[] = [];
       for (const row of rows) {
-        if (!row.aiResult) continue;
+        if (!row.aiResult || row.deletedAt) continue;
         for (const item of row.aiResult.checklist) {
           items.push({
             ...item,
