@@ -35,6 +35,46 @@ const ACTIVE_JOB_KEY_PREFIX = "lecture-recorder:activeJob:";
 // Redis on a job that can run for minutes.
 const POLL_INTERVAL_MS = 4000;
 
+// A backgrounded mobile tab doesn't just stop making progress on its own —
+// browsers throttle (Chrome) or fully suspend (iOS Safari/PWA) a hidden
+// page's timers, so the poll loop's next `setTimeout` can land anywhere
+// from late to "whenever the OS gets around to it" instead of every 4s.
+// The job itself is unaffected either way (it's a server-side after()
+// continuation with no live connection to this tab at all — see
+// app/api/transcribe-and-summarize/route.ts) — the only thing actually
+// stale is this tab's next check-in. Rather than have every caller wire up
+// its own visibilitychange listener, pollJobUntilDone's own wait races
+// against this single shared "the page just became visible" signal, so
+// coming back to the tab triggers an immediate re-check instead of waiting
+// out however much of the throttled interval is left.
+const visibilityWakeTarget = typeof window !== "undefined" ? new EventTarget() : null;
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      visibilityWakeTarget?.dispatchEvent(new Event("wake"));
+    }
+  });
+}
+
+function delayOrWake(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      visibilityWakeTarget?.removeEventListener("wake", onWake);
+      resolve();
+    }, ms);
+    function onWake() {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    }
+    visibilityWakeTarget?.addEventListener("wake", onWake);
+  });
+}
+
 // Keyed by session, not globally — this app only ever runs one analysis per
 // session at a time (mirrors the isAnalyzing gate in RecordingDetailView),
 // so recovering "the" active job for a session is unambiguous.
@@ -100,6 +140,6 @@ export async function pollJobUntilDone(
     onTick?.(status);
     if (status.status === "completed") return status.result;
     if (status.status === "error") throw new Error(status.error);
-    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    await delayOrWake(POLL_INTERVAL_MS);
   }
 }
