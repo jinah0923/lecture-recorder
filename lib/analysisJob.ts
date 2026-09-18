@@ -17,7 +17,15 @@ export type BlobRefPayload = {
 };
 
 export type AnalyzeRequestPayload = {
-  audioBlob: BlobRefPayload;
+  // Identifies the recording across separate job attempts, independent of
+  // jobId (fresh every attempt) — lets the server find a prior attempt's
+  // STT checkpoint on retry (see route.ts's SttCheckpoint).
+  sessionId: string;
+  // Null when resuming from a checkpoint (see checkSttCheckpoint) — the
+  // server never touches the original audio on a checkpoint resume, so
+  // RecordingDetailView skips the (possibly large) upload entirely rather
+  // than uploading it just to have the server ignore it.
+  audioBlob: BlobRefPayload | null;
   referenceBlobs: BlobRefPayload[];
   bookmarks: unknown[];
   keywords: string[];
@@ -134,6 +142,23 @@ export async function startAnalysisJob(payload: AnalyzeRequestPayload): Promise<
     throw new Error("작업 ID를 받지 못했습니다.");
   }
   return data.jobId;
+}
+
+// Checked before analysis even starts (RecordingDetailView's mount effect
+// and its post-failure recheck) — drives the "이어서 분석 재개하기" button
+// label and lets handleAnalyze skip re-uploading the audio file entirely
+// when a prior attempt for this session already completed STAGE 1 (STT).
+// Best-effort: a network hiccup here just means the button stays on its
+// default label rather than blocking anything.
+export async function checkSttCheckpoint(sessionId: string): Promise<boolean> {
+  try {
+    const response = await fetch(`/api/transcribe-and-summarize?checkpointFor=${encodeURIComponent(sessionId)}`);
+    if (!response.ok) return false;
+    const data = (await response.json()) as { hasCheckpoint?: unknown };
+    return data.hasCheckpoint === true;
+  } catch {
+    return false;
+  }
 }
 
 async function fetchJobStatus(jobId: string): Promise<JobStatusResponse> {

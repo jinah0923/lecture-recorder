@@ -1,13 +1,21 @@
-import type { ChecklistFeedItem, LectureSession, LectureSessionSummary, SlideImage } from "@/lib/types";
+import type { ChecklistFeedItem, LectureSession, LectureSessionSummary, SessionAudio, SlideImage } from "@/lib/types";
 
 const DB_NAME = "lecture-recorder";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const SESSION_STORE = "session";
 const CATEGORY_STORE = "categories";
 // Kept separate from SESSION_STORE — slide images are meaningfully larger
 // than the rest of a session's data, so they get their own store rather
 // than bloating every session read with image payloads it may not need.
 const SLIDE_IMAGE_STORE = "slideImages";
+// A temporary cache of the in-progress recording's audio Blob, keyed by
+// sessionId — separate from SESSION_STORE (which never persists the blob
+// itself, only metadata like audioFileName) so this can be cleared
+// independently the moment it's no longer needed (see deleteCachedAudioBlob)
+// without touching the session row at all. Exists purely to survive a
+// refresh/background-kill mid-analysis; not a permanent audio store — see
+// RecordingDetailView.tsx, which clears it once analysis fully completes.
+const AUDIO_CACHE_STORE = "audioCache";
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -23,6 +31,9 @@ function openDb(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(SLIDE_IMAGE_STORE)) {
         db.createObjectStore(SLIDE_IMAGE_STORE, { keyPath: "sessionId" });
+      }
+      if (!db.objectStoreNames.contains(AUDIO_CACHE_STORE)) {
+        db.createObjectStore(AUDIO_CACHE_STORE, { keyPath: "sessionId" });
       }
     };
 
@@ -91,6 +102,7 @@ export async function permanentlyDeleteSession(id: string): Promise<LectureSessi
   const session = await loadSessionById(id);
   await runTransaction(SESSION_STORE, "readwrite", (store) => store.delete(id));
   await deleteSlideImages(id);
+  await deleteCachedAudioBlob(id);
   return session;
 }
 
@@ -286,6 +298,36 @@ export async function loadSlideImages(sessionId: string): Promise<SlideImage[]> 
 
 export async function deleteSlideImages(sessionId: string): Promise<void> {
   await runTransaction(SLIDE_IMAGE_STORE, "readwrite", (store) => store.delete(sessionId));
+}
+
+// Caches the currently-selected/recorded audio Blob for a session so a
+// refresh or a backgrounded-tab kill mid-analysis doesn't force the user to
+// re-select the file (see components/RecordingDetailView.tsx's mount
+// recovery effect and ReattachAudioPrompt, which this is meant to make
+// unnecessary in the common case). Overwrites any previous entry for the
+// same session — there's only ever one "current" audio per session.
+export async function cacheAudioBlob(sessionId: string, audio: SessionAudio): Promise<void> {
+  await runTransaction(AUDIO_CACHE_STORE, "readwrite", (store) =>
+    store.put({ sessionId, audio, cachedAt: Date.now() }),
+  );
+}
+
+export async function loadCachedAudioBlob(sessionId: string): Promise<SessionAudio | null> {
+  const result = await runTransaction<{ sessionId: string; audio: SessionAudio; cachedAt: number } | undefined>(
+    AUDIO_CACHE_STORE,
+    "readonly",
+    (store) => store.get(sessionId),
+  );
+  return result?.audio ?? null;
+}
+
+// Called once analysis fully completes (the cache's whole purpose is
+// protecting an in-progress analysis, not permanent storage — see
+// AUDIO_CACHE_STORE above) and from permanentlyDeleteSession above, so a
+// deleted session's cached audio never lingers as an orphaned IndexedDB
+// entry.
+export async function deleteCachedAudioBlob(sessionId: string): Promise<void> {
+  await runTransaction(AUDIO_CACHE_STORE, "readwrite", (store) => store.delete(sessionId));
 }
 
 export async function loadCategories(): Promise<string[]> {

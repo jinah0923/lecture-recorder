@@ -11,6 +11,7 @@ import { ReferenceDocDropzone } from "@/components/ReferenceDocDropzone";
 import { ReviewPanel } from "@/components/ReviewPanel";
 import {
   POLL_TIMEOUT_MESSAGE,
+  checkSttCheckpoint,
   clearStoredJobId,
   getStoredJobId,
   pollJobUntilDone,
@@ -18,7 +19,15 @@ import {
   startAnalysisJob,
 } from "@/lib/analysisJob";
 import { probeAudioDurationMs } from "@/lib/audio";
-import { loadSessionById, loadSlideImages, saveSession, saveSlideImages } from "@/lib/db";
+import {
+  cacheAudioBlob,
+  deleteCachedAudioBlob,
+  loadCachedAudioBlob,
+  loadSessionById,
+  loadSlideImages,
+  saveSession,
+  saveSlideImages,
+} from "@/lib/db";
 import { formatDateTime, formatFileSize } from "@/lib/format";
 import type { UploadedBlobRef } from "@/lib/blobUpload";
 import { uploadFileToBlob } from "@/lib/blobUpload";
@@ -93,6 +102,14 @@ export function RecordingDetailView({
   // the analyze button the way analyzeError does.
   const [pollFailureToast, setPollFailureToast] = useState<string | null>(null);
   const pollFailureToastTimerRef = useRef<number | null>(null);
+  // Whether a prior analysis attempt for this session already completed
+  // STAGE 1 (STT) server-side and has it checkpointed (see route.ts's
+  // SttCheckpoint) — drives the "이어서 분석 재개하기" button label and lets
+  // handleAnalyze skip re-uploading audio entirely. Rechecked on mount and
+  // again after any failed attempt (a fresh checkpoint may have just been
+  // written during that very attempt's STT phase before it failed at
+  // stage 2).
+  const [hasSttCheckpoint, setHasSttCheckpoint] = useState(false);
 
   const [keywords, setKeywords] = useState<string[]>([]);
   const [referenceFileNames, setReferenceFileNames] = useState<string[]>([]);
@@ -112,10 +129,44 @@ export function RecordingDetailView({
     [slideImages],
   );
 
-  // The actual audio Blob is never persisted — it only exists here, either
-  // handed off fresh from NewRecordingView or re-attached by the user from
-  // their device for this viewing session.
+  // The audio Blob itself lives only in memory here — handed off fresh from
+  // NewRecordingView, re-attached by the user, or auto-recovered from the
+  // IndexedDB audio cache below (see the recovery effect) — but a copy is
+  // also cached to IndexedDB (cacheAudioBlob) so a refresh or a
+  // backgrounded-tab kill mid-analysis can restore it here automatically
+  // instead of forcing ReattachAudioPrompt. The cache is temporary, not a
+  // permanent audio store — it's cleared once analysis fully completes
+  // (resumeJobPolling) or the session is permanently deleted.
   const [localAudio, setLocalAudio] = useState<SessionAudio | null>(initialAudio ?? null);
+
+  // Caches the hot-handoff audio (a brand new recording/upload just
+  // finished in NewRecordingView) the moment this view mounts with it — see
+  // the localAudio comment above. Deliberately run once on mount only
+  // (empty deps): initialAudio is a one-shot handoff from the parent, not
+  // something this effect should react to changing again later.
+  useEffect(() => {
+    if (initialAudio) {
+      cacheAudioBlob(sessionId, initialAudio).catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Auto-recovery: if this session has no audio in memory (e.g. a refresh
+  // wiped React state, or the tab was backgrounded/reclaimed mid-analysis),
+  // try restoring it from the IndexedDB cache before ever falling back to
+  // ReattachAudioPrompt. Guarded on !localAudio so this can't clobber a
+  // hot handoff or a just-reattached file, and only runs after hydration so
+  // it doesn't race the session-load effect above.
+  useEffect(() => {
+    if (!hydrated || notFound || localAudio) return;
+    let cancelled = false;
+    loadCachedAudioBlob(sessionId).then((cached) => {
+      if (!cancelled && cached) setLocalAudio(cached);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [hydrated, notFound, localAudio, sessionId]);
 
   const audioRef = useRef<HTMLAudioElement>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
@@ -165,6 +216,21 @@ export function RecordingDetailView({
       cancelled = true;
     };
   }, [sessionId]);
+
+  // Checks whether a prior attempt already checkpointed STAGE 1 (STT) for
+  // this session server-side — see hasSttCheckpoint's declaration above.
+  // Exposed as a stable callback so resumeJobPolling's failure handler can
+  // re-invoke it after an attempt fails (a checkpoint may have just been
+  // written during that very attempt, before it failed at stage 2).
+  const refreshCheckpointStatus = useCallback(async () => {
+    const has = await checkSttCheckpoint(sessionId);
+    setHasSttCheckpoint(has);
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (!hydrated || notFound || aiResult) return;
+    refreshCheckpointStatus();
+  }, [hydrated, notFound, aiResult, refreshCheckpointStatus]);
 
   // Shared by the debounced autosave below and by resumeJobPolling (which
   // needs to persist a job's result immediately, not debounced) — both just
@@ -298,14 +364,16 @@ export function RecordingDetailView({
 
   async function handleReattach(file: File) {
     const probedMs = await probeAudioDurationMs(file);
-    setLocalAudio({
+    const audio: SessionAudio = {
       kind: "upload",
       name: file.name,
       sizeLabel: formatFileSize(file.size),
       mimeType: file.type || "audio/webm",
       durationMs: probedMs || durationMs,
       blob: file,
-    });
+    };
+    setLocalAudio(audio);
+    await cacheAudioBlob(sessionId, audio).catch(() => {});
   }
 
   // Stable identities (useCallback) for everything handed down to
@@ -374,6 +442,12 @@ export function RecordingDetailView({
         const session = buildSessionSnapshot({ aiResult: nextAiResult });
         await saveSession(session);
         onSessionSaved();
+        // Analysis is fully done — the cached audio (and the server-side
+        // STT checkpoint, already deleted server-side on success) have no
+        // remaining purpose, so free the IndexedDB space now rather than
+        // leaving a 완전 종료된 session's audio sitting there indefinitely.
+        await deleteCachedAudioBlob(sessionId).catch(() => {});
+        setHasSttCheckpoint(false);
         // Explicit, not just piggybacked on the parent's own refreshAll()
         // — fails silently when signed out, since cloud sync is opt-in via
         // Google login (see lib/sync.ts); a real push when signed in.
@@ -389,17 +463,23 @@ export function RecordingDetailView({
         setPollFailureToast(POLL_TIMEOUT_MESSAGE);
         if (pollFailureToastTimerRef.current) window.clearTimeout(pollFailureToastTimerRef.current);
         pollFailureToastTimerRef.current = window.setTimeout(() => setPollFailureToast(null), 5000);
+        // A checkpoint may have just been written server-side during THIS
+        // very attempt's STT phase, moments before it failed at stage 2 —
+        // recheck so the button immediately offers "이어서 분석 재개하기"
+        // instead of requiring a reload to notice.
+        await refreshCheckpointStatus();
       } finally {
         isPollingRef.current = false;
         setIsAnalyzing(false);
         setAnalyzeProgress("");
       }
     },
-    [sessionId, buildSessionSnapshot, onSessionSaved],
+    [sessionId, buildSessionSnapshot, onSessionSaved, refreshCheckpointStatus],
   );
 
   async function handleAnalyze() {
-    if (!localAudio?.blob || isAnalyzing) return;
+    if (isAnalyzing) return;
+    if (!hasSttCheckpoint && !localAudio?.blob) return;
 
     setIsAnalyzing(true);
     setAnalyzeError(null);
@@ -412,13 +492,26 @@ export function RecordingDetailView({
       // tried first and rejected outright by Google's endpoint — no CORS
       // support). Only the resulting blob references (small JSON) get sent
       // to /api/transcribe-and-summarize below. See lib/blobUpload.ts.
-      setAnalyzeProgress("오디오 업로드 중...");
-      const audioBlob = await uploadFileToBlob(
-        localAudio.blob,
-        localAudio.name || "audio",
-        localAudio.mimeType || "audio/webm",
-        (fraction) => setAnalyzeProgress(`오디오 업로드 중... (${Math.round(fraction * 100)}%)`),
-      );
+      //
+      // Skipped entirely when a STAGE 1 checkpoint already exists for this
+      // session (hasSttCheckpoint) — the server never touches the original
+      // audio on a checkpoint resume (see route.ts's
+      // runAnalysisOnlyFromCheckpoint), so uploading it here would just be
+      // wasted bandwidth/time, and this also means "이어서 분석 재개하기"
+      // works even if localAudio was never recovered (IndexedDB cache lost
+      // too, no reattach yet) — resuming genuinely doesn't need it.
+      let audioBlob: UploadedBlobRef | null = null;
+      if (hasSttCheckpoint) {
+        setAnalyzeProgress("이전 STT 결과를 불러오는 중...");
+      } else {
+        setAnalyzeProgress("오디오 업로드 중...");
+        audioBlob = await uploadFileToBlob(
+          localAudio!.blob,
+          localAudio!.name || "audio",
+          localAudio!.mimeType || "audio/webm",
+          (fraction) => setAnalyzeProgress(`오디오 업로드 중... (${Math.round(fraction * 100)}%)`),
+        );
+      }
 
       const referenceBlobs: UploadedBlobRef[] = [];
       for (let index = 0; index < referenceDocs.length; index++) {
@@ -441,7 +534,15 @@ export function RecordingDetailView({
       // approach was still vulnerable to that: the client connection itself
       // gets suspended by the OS, independent of anything the server does).
       setAnalyzeProgress("서버 분석 요청 중...");
-      const jobId = await startAnalysisJob({ audioBlob, referenceBlobs, bookmarks, keywords, slideThumbnails, durationMs });
+      const jobId = await startAnalysisJob({
+        sessionId,
+        audioBlob,
+        referenceBlobs,
+        bookmarks,
+        keywords,
+        slideThumbnails,
+        durationMs,
+      });
       // Persisted before polling starts, not after — if the tab gets
       // backgrounded or closed between these two lines, the job is still
       // recoverable on next open (see the mount effect below).
@@ -687,7 +788,7 @@ export function RecordingDetailView({
           <button
             type="button"
             onClick={handleAnalyze}
-            disabled={isAnalyzing || !localAudio}
+            disabled={isAnalyzing || (!localAudio && !hasSttCheckpoint)}
             className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:bg-indigo-300 dark:disabled:bg-indigo-900"
           >
             {isAnalyzing ? (
@@ -695,12 +796,19 @@ export function RecordingDetailView({
                 <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
                 {analyzeProgress || "분석 중..."}
               </>
-            ) : !localAudio ? (
+            ) : !localAudio && !hasSttCheckpoint ? (
               "오디오를 불러오면 분석할 수 있어요"
+            ) : hasSttCheckpoint ? (
+              "이어서 분석 재개하기 (STT 완료됨)"
             ) : (
               "AI 분석 및 요약 시작"
             )}
           </button>
+          {hasSttCheckpoint && !isAnalyzing && (
+            <p className="mt-2 text-xs text-emerald-600 dark:text-emerald-400">
+              ✅ 이전 시도에서 음성 인식(STT)까지는 이미 완료되어 저장되었어요. 다시 눌러도 STT는 재사용되어 크레딧이 중복 소모되지 않아요.
+            </p>
+          )}
           {analyzeError && (
             <p className="mt-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600 dark:bg-red-950/40 dark:text-red-400">{analyzeError}</p>
           )}

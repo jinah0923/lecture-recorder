@@ -92,6 +92,15 @@ type IncomingBlobRef = {
 type BlobRef = { url: string; fileName: string; mimeType: string };
 
 type AnalyzeRequestBody = {
+  // Identifies the recording across separate job attempts — required so a
+  // retry can find its predecessor's STT checkpoint (see SttCheckpoint).
+  // Not a jobId: a fresh jobId is minted per POST regardless, but the
+  // checkpoint has to outlive any single attempt to be resumable at all.
+  sessionId?: unknown;
+  // Optional when a checkpoint already exists for this sessionId — a
+  // checkpoint resume never touches the original audio (see
+  // runAnalysisOnlyFromCheckpoint), so the client skips re-uploading it
+  // entirely on retry (see lib/analysisJob.ts's checkSttCheckpoint).
   audioBlob?: IncomingBlobRef;
   referenceBlobs?: unknown;
   bookmarks?: unknown;
@@ -123,6 +132,26 @@ type JobRecord =
   | { status: "completed"; createdAt: number; result: AnalysisResult }
   | { status: "error"; createdAt: number; error: string };
 
+// A single normalized STT segment, used both to build the checkpoint's
+// transcript text and to feed buildAnalysisResult on a resumed retry — see
+// SttCheckpoint below.
+type CheckpointSegment = { startSeconds: number; endSeconds: number; text: string };
+
+// STAGE 1 (STT) checkpoint — written the moment transcription finishes
+// (see runDirectAnalysisJob/runChunkedAnalysisJob), independent of whether
+// STAGE 2 (LLM analysis) that follows ever succeeds. Keyed by sessionId
+// (sttCheckpointKeyFor below), not jobId, so a later retry's fresh POST/job
+// can find it and skip STT entirely (runAnalysisOnlyFromCheckpoint). Only
+// ever written when hasSpeech is true — a no-speech result completes the
+// whole job in one step with nothing worth checkpointing (see both run*
+// functions' early returns).
+type SttCheckpoint = {
+  createdAt: number;
+  transcriptText: string;
+  segments: CheckpointSegment[];
+  hasSpeech: true;
+};
+
 const MODEL = "gemini-3.6-flash";
 // Mirrors ReferenceDocDropzone's own cap (components/ReferenceDocDropzone.tsx)
 // — enforced here too since the client-side limit is only a UX nicety, not
@@ -135,6 +164,14 @@ const FILE_PROCESSING_TIMEOUT_MS = 5 * 60 * 1000;
 // the app well after a background/close still finds the result, bounded so
 // stale jobs don't accumulate forever.
 const JOB_TTL_SECONDS = 24 * 60 * 60;
+
+// How long a STAGE 1 (STT) checkpoint survives in Redis, keyed by sessionId
+// (not jobId — a checkpoint must outlive the specific job attempt that
+// created it, since its whole purpose is to be found again by a LATER,
+// separate POST/job when the user retries after a stage-2 failure). 24h
+// mirrors JOB_TTL_SECONDS — generous for "come back later and retry"
+// without keeping (potentially large) transcript text in Redis forever.
+const STT_CHECKPOINT_TTL_SECONDS = 24 * 60 * 60;
 
 // Above this, the raw audio never goes to Gemini as one file — see
 // splitAudioFile/runChunkedAnalysisJob below. 30 minutes is comfortably
@@ -294,6 +331,69 @@ async function reportStage(jobId: string, stage: string): Promise<void> {
   } catch (error) {
     console.error("[transcribe-and-summarize] failed to report stage", { jobId, stage, error });
   }
+}
+
+function sttCheckpointKeyFor(sessionId: string): string {
+  return `stt-checkpoint:${sessionId}`;
+}
+
+async function writeSttCheckpoint(sessionId: string, checkpoint: SttCheckpoint): Promise<void> {
+  try {
+    const redis = getRedisClient();
+    await redis?.set(sttCheckpointKeyFor(sessionId), JSON.stringify(checkpoint), "EX", STT_CHECKPOINT_TTL_SECONDS);
+  } catch (error) {
+    // Best-effort, like reportStage — a failed checkpoint write shouldn't
+    // fail the job that's still in progress; it just means a future retry
+    // (if this job later fails at stage 2) won't have anything to resume
+    // from and will redo STT from scratch instead.
+    console.error("[transcribe-and-summarize] failed to write STT checkpoint", { sessionId, error });
+  }
+}
+
+async function readSttCheckpoint(sessionId: string): Promise<SttCheckpoint | null> {
+  const redis = getRedisClient();
+  const raw = await redis?.get(sttCheckpointKeyFor(sessionId));
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as SttCheckpoint;
+  } catch {
+    return null;
+  }
+}
+
+async function deleteSttCheckpoint(sessionId: string): Promise<void> {
+  try {
+    const redis = getRedisClient();
+    await redis?.del(sttCheckpointKeyFor(sessionId));
+  } catch (error) {
+    // Non-critical — TTL cleans it up eventually either way, and a
+    // completed job never reads this key again regardless.
+    console.error("[transcribe-and-summarize] failed to delete STT checkpoint", { sessionId, error });
+  }
+}
+
+// Turns a worker's raw script array into concrete numeric segments — shared
+// by the checkpoint write path (both run* functions) so a resumed retry
+// (runAnalysisOnlyFromCheckpoint) sees the exact same segment shape either
+// way, regardless of whether the original attempt was direct or chunked.
+function normalizeSttSegments(rawScript: unknown): CheckpointSegment[] {
+  const rawSegments = Array.isArray(rawScript) ? rawScript : [];
+  return rawSegments.map((segment) => {
+    const s = segment as { startSeconds?: unknown; endSeconds?: unknown; text?: unknown };
+    return {
+      startSeconds: Number(s.startSeconds ?? 0),
+      endSeconds: Number(s.endSeconds ?? 0),
+      text: typeof s.text === "string" ? s.text : "",
+    };
+  });
+}
+
+// Same timestamped-line format runChunkedAnalysisJob already used for its
+// merged transcript — kept identical so the analysis worker sees the same
+// shape of input whether it's reading a checkpointed transcript or a
+// freshly-merged chunked one.
+function segmentsToTranscriptText(segments: CheckpointSegment[]): string {
+  return segments.map((s) => `[${formatTimestamp(s.startSeconds * 1000)}] ${s.text}`).join("\n");
 }
 
 const GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com";
@@ -523,7 +623,6 @@ async function deleteUploadedFile(ai: GoogleGenAI, file: GenAiFile | null): Prom
   }
 }
 
-type RawSttSegment = { startSeconds?: unknown; endSeconds?: unknown; text?: unknown };
 type RawSttResponse = { hasSpeech?: unknown; script?: unknown };
 type RawAnalysisResponse = { summary?: unknown; lectureNote?: unknown; checklist?: unknown };
 
@@ -904,6 +1003,7 @@ async function uploadReferenceFiles(ai: GoogleGenAI, apiKey: string, referenceBl
 // whatever the client's connection is doing by that point.
 async function runDirectAnalysisJob(
   apiKey: string,
+  sessionId: string,
   audioBlobRef: BlobRef,
   referenceBlobRefs: BlobRef[],
   bookmarks: IncomingBookmark[],
@@ -944,13 +1044,40 @@ async function runDirectAnalysisJob(
   // Two independent Gemini calls in parallel — see callSttWorker/
   // callAnalysisWorker above for why this replaced the old single combined
   // call. Both reference the same already-uploaded audio file (no re-upload).
+  //
+  // STAGE 1/STAGE 2 checkpointing: sttPromise's own .then() below writes the
+  // STT checkpoint the instant transcription finishes, completely
+  // independent of whether analysisPromise (STAGE 2) is still running or
+  // later fails/times out — Promise.all rejecting on analysisPromise can
+  // never "undo" a checkpoint write that already happened on sttPromise's
+  // own chain. This keeps the STT and LLM calls genuinely concurrent (same
+  // wall-clock time as before this feature existed) while still guaranteeing
+  // the checkpoint lands the moment STT is done, not only after both finish.
   let sttResult: RawSttResponse;
   let analysisResult: RawAnalysisResponse;
   try {
-    [sttResult, analysisResult] = await Promise.all([
-      callSttWorker(ai, uploadedAudio),
-      callAnalysisWorker(ai, { kind: "file", file: uploadedAudio }, uploadedReferences, slideThumbnails, keywords, bookmarkLines),
-    ]);
+    const sttPromise = callSttWorker(ai, uploadedAudio).then(async (result) => {
+      const hasSpeech = result.hasSpeech === true && Array.isArray(result.script) && result.script.length > 0;
+      if (hasSpeech) {
+        const segments = normalizeSttSegments(result.script);
+        await writeSttCheckpoint(sessionId, {
+          createdAt: Date.now(),
+          transcriptText: segmentsToTranscriptText(segments),
+          segments,
+          hasSpeech: true,
+        });
+      }
+      return result;
+    });
+    const analysisPromise = callAnalysisWorker(
+      ai,
+      { kind: "file", file: uploadedAudio },
+      uploadedReferences,
+      slideThumbnails,
+      keywords,
+      bookmarkLines,
+    );
+    [sttResult, analysisResult] = await Promise.all([sttPromise, analysisPromise]);
   } catch (error) {
     console.error("[transcribe-and-summarize] Gemini call failed", {
       model: MODEL,
@@ -982,6 +1109,7 @@ async function runDirectAnalysisJob(
 async function runChunkedAnalysisJob(
   apiKey: string,
   jobId: string,
+  sessionId: string,
   audioBlobRef: BlobRef,
   referenceBlobRefs: BlobRef[],
   bookmarks: IncomingBookmark[],
@@ -1044,20 +1172,18 @@ async function runChunkedAnalysisJob(
     );
 
     const hasSpeech = chunkResults.some(({ result }) => result.hasSpeech === true);
-    const mergedSegments: RawSttSegment[] = [];
+    const mergedSegments: CheckpointSegment[] = [];
     let segmentIndex = 0;
     // chunkResults preserves chunks' original chronological order (Promise.all
     // resolves in input order regardless of which chunk actually finished
     // first), so this merge doesn't need to re-sort anything.
     for (const { chunk, result } of chunkResults) {
-      const rawSegments = Array.isArray(result.script) ? result.script : [];
       const offsetSeconds = chunk.startMs / 1000;
-      for (const segment of rawSegments) {
-        const s = segment as { startSeconds?: unknown; endSeconds?: unknown; text?: unknown };
+      for (const segment of normalizeSttSegments(result.script)) {
         mergedSegments.push({
-          startSeconds: Number(s.startSeconds ?? 0) + offsetSeconds,
-          endSeconds: Number(s.endSeconds ?? 0) + offsetSeconds,
-          text: typeof s.text === "string" ? s.text : "",
+          startSeconds: segment.startSeconds + offsetSeconds,
+          endSeconds: segment.endSeconds + offsetSeconds,
+          text: segment.text,
         });
         segmentIndex++;
       }
@@ -1072,12 +1198,19 @@ async function runChunkedAnalysisJob(
       return buildAnalysisResult([], false, {});
     }
 
+    // STAGE 1 (STT, chunked) complete — checkpoint immediately, before
+    // STAGE 2 (LLM analysis) below ever runs, so a stage-2 timeout/failure
+    // never forces every chunk to be re-split, re-uploaded, and
+    // re-transcribed on retry (see runAnalysisOnlyFromCheckpoint).
+    const transcriptText = segmentsToTranscriptText(mergedSegments);
+    await writeSttCheckpoint(sessionId, {
+      createdAt: Date.now(),
+      transcriptText,
+      segments: mergedSegments,
+      hasSpeech: true,
+    });
+
     await reportStage(jobId, "AI 요약 생성 중...");
-    const transcriptText = mergedSegments
-      .map((s) => {
-        return `[${formatTimestamp(Number(s.startSeconds ?? 0) * 1000)}] ${typeof s.text === "string" ? s.text : ""}`;
-      })
-      .join("\n");
 
     const bookmarkLines = bookmarks
       .map((bookmark) => `- [${formatTimestamp(bookmark.atMs)}] ${bookmark.label}`)
@@ -1110,22 +1243,83 @@ async function runChunkedAnalysisJob(
   }
 }
 
-// Dispatches to the chunked or direct path based on the client-reported
-// duration — see CHUNK_THRESHOLD_MS.
+// STAGE 2 only — resumes from a previously-checkpointed STT result (see
+// SttCheckpoint), skipping audio download/upload/chunking/transcription
+// entirely regardless of whether the original attempt was direct or
+// chunked (both converge on the same {transcriptText, segments, hasSpeech}
+// shape by the time a checkpoint exists). This is what actually avoids
+// burning STT credits again on a retry after a stage-2-only failure — and
+// since it never touches the original audio at all, it works even if the
+// client no longer has it (e.g. the IndexedDB audio cache was lost too).
+async function runAnalysisOnlyFromCheckpoint(
+  apiKey: string,
+  jobId: string,
+  checkpoint: SttCheckpoint,
+  referenceBlobRefs: BlobRef[],
+  bookmarks: IncomingBookmark[],
+  keywords: string[],
+  slideThumbnails: IncomingSlideThumbnail[],
+): Promise<AnalysisResult> {
+  const ai = new GoogleGenAI({ apiKey });
+  let uploadedReferences: GenAiFile[] = [];
+
+  try {
+    await reportStage(jobId, "AI 요약 생성 중... (STT 결과 재사용)");
+    uploadedReferences = await uploadReferenceFiles(ai, apiKey, referenceBlobRefs);
+
+    const bookmarkLines = bookmarks
+      .map((bookmark) => `- [${formatTimestamp(bookmark.atMs)}] ${bookmark.label}`)
+      .join("\n");
+
+    const analysisResult = await callAnalysisWorker(
+      ai,
+      { kind: "transcript", text: checkpoint.transcriptText },
+      uploadedReferences,
+      slideThumbnails,
+      keywords,
+      bookmarkLines,
+    );
+    return buildAnalysisResult(checkpoint.segments, checkpoint.hasSpeech, analysisResult);
+  } catch (error) {
+    console.error("[transcribe-and-summarize] checkpoint-resumed analysis worker failed", {
+      model: MODEL,
+      status: error instanceof ApiError ? error.status : undefined,
+      error,
+    });
+    throw new Error(describeGeminiError(error));
+  } finally {
+    await Promise.all(uploadedReferences.map((file) => deleteUploadedFile(ai, file)));
+  }
+}
+
+// Dispatches to: a checkpoint resume (STAGE 2 only, if a prior attempt for
+// this session already completed STT — see SttCheckpoint), or else the
+// chunked/direct STAGE 1+2 path based on the client-reported duration (see
+// CHUNK_THRESHOLD_MS). The checkpoint check always comes first — it's what
+// makes a retry after a stage-2 failure skip STT regardless of how long the
+// recording is.
 async function runAnalysisJob(
   apiKey: string,
   jobId: string,
-  audioBlobRef: BlobRef,
+  sessionId: string,
+  audioBlobRef: BlobRef | null,
   referenceBlobRefs: BlobRef[],
   bookmarks: IncomingBookmark[],
   keywords: string[],
   slideThumbnails: IncomingSlideThumbnail[],
   durationMs: number,
 ): Promise<AnalysisResult> {
-  if (durationMs > CHUNK_THRESHOLD_MS) {
-    return runChunkedAnalysisJob(apiKey, jobId, audioBlobRef, referenceBlobRefs, bookmarks, keywords, slideThumbnails, durationMs);
+  const checkpoint = await readSttCheckpoint(sessionId);
+  if (checkpoint) {
+    return runAnalysisOnlyFromCheckpoint(apiKey, jobId, checkpoint, referenceBlobRefs, bookmarks, keywords, slideThumbnails);
   }
-  return runDirectAnalysisJob(apiKey, audioBlobRef, referenceBlobRefs, bookmarks, keywords, slideThumbnails);
+  if (!audioBlobRef) {
+    throw new Error("오디오 파일 업로드 정보가 없어 분석을 시작할 수 없습니다. 파일을 다시 첨부해주세요.");
+  }
+  if (durationMs > CHUNK_THRESHOLD_MS) {
+    return runChunkedAnalysisJob(apiKey, jobId, sessionId, audioBlobRef, referenceBlobRefs, bookmarks, keywords, slideThumbnails, durationMs);
+  }
+  return runDirectAnalysisJob(apiKey, sessionId, audioBlobRef, referenceBlobRefs, bookmarks, keywords, slideThumbnails);
 }
 
 // Kicks off a job and returns its id immediately — see the file-level
@@ -1153,11 +1347,19 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "요청 본문을 읽을 수 없습니다." }, { status: 400 });
   }
 
+  const sessionId = typeof body.sessionId === "string" && body.sessionId.trim() ? body.sessionId.trim() : null;
+  if (!sessionId) {
+    return NextResponse.json({ error: "세션 정보가 전달되지 않았습니다." }, { status: 400 });
+  }
+
   // The audio must already be uploaded to Vercel Blob by the client
   // (lib/blobUpload.ts) before this route is ever called. Only its blob
-  // reference arrives here.
-  const audioBlobRef = parseBlobRef(body.audioBlob);
-  if (!audioBlobRef) {
+  // reference arrives here. Absent is only valid when a STAGE 1 checkpoint
+  // already exists for this session (see runAnalysisJob) — the client
+  // knows this in advance via checkSttCheckpoint and skips the upload, so
+  // this is re-checked here rather than trusted from the client alone.
+  const audioBlobRef = body.audioBlob ? parseBlobRef(body.audioBlob) : null;
+  if (!audioBlobRef && !(await readSttCheckpoint(sessionId))) {
     return NextResponse.json(
       { error: "오디오 파일 업로드 정보가 전달되지 않았습니다. 파일을 다시 첨부해주세요." },
       { status: 400 },
@@ -1192,8 +1394,23 @@ export async function POST(request: Request) {
 
   after(async () => {
     try {
-      const result = await runAnalysisJob(apiKey, jobId, audioBlobRef, referenceBlobRefs, bookmarks, keywords, slideThumbnails, durationMs);
+      const result = await runAnalysisJob(
+        apiKey,
+        jobId,
+        sessionId,
+        audioBlobRef,
+        referenceBlobRefs,
+        bookmarks,
+        keywords,
+        slideThumbnails,
+        durationMs,
+      );
       await writeJobRecord(jobId, { status: "completed", createdAt: Date.now(), result });
+      // The checkpoint's only job was protecting against a STAGE 2 failure
+      // on THIS attempt — now that the whole job has succeeded, it's dead
+      // weight (and could otherwise cause a much later, unrelated re-analyze
+      // of this same session to wrongly skip STT against a stale script).
+      await deleteSttCheckpoint(sessionId);
     } catch (error) {
       // Covers every error this route's own code can throw and catch —
       // Gemini failures, ffmpeg failures, upload failures, all already
@@ -1225,6 +1442,17 @@ export async function GET(request: Request) {
   }
 
   const url = new URL(request.url);
+
+  // Lets the client know, before it even starts uploading anything, whether
+  // a STAGE 1 checkpoint already exists for this session — drives both the
+  // "이어서 분석 재개하기" button label and skipping the (possibly large)
+  // audio re-upload entirely on retry (see components/RecordingDetailView.tsx).
+  const checkpointFor = url.searchParams.get("checkpointFor");
+  if (checkpointFor) {
+    const checkpoint = await readSttCheckpoint(checkpointFor);
+    return NextResponse.json({ hasCheckpoint: checkpoint !== null });
+  }
+
   const jobId = url.searchParams.get("jobId");
   if (!jobId) {
     return NextResponse.json({ error: "jobId가 전달되지 않았습니다." }, { status: 400 });
