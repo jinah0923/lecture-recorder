@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSession } from "next-auth/react";
 import { AddCategoryModal } from "@/components/AddCategoryModal";
 import { AlbumView } from "@/components/AlbumView";
@@ -52,6 +52,85 @@ export function LectureStudio() {
   const [handoffAudio, setHandoffAudio] = useState<{ sessionId: string; audio: SessionAudio } | null>(
     null,
   );
+  const [showExitToast, setShowExitToast] = useState(false);
+
+  // popstate's handler is registered once (see the effect below) and would
+  // otherwise close over the screenStack from that first render — this
+  // keeps it reading the live value without re-subscribing the listener on
+  // every navigation.
+  const screenStackRef = useRef(screenStack);
+  useEffect(() => {
+    screenStackRef.current = screenStack;
+  }, [screenStack]);
+
+  const exitArmedRef = useRef(false);
+  const exitTimerRef = useRef<number | null>(null);
+
+  // Wires the physical/gesture back action (Android's system back button, a
+  // browser's back swipe) to this app's own screen stack instead of leaving
+  // popstate to fall through to whatever the browser would otherwise do
+  // (navigate away from the PWA / close it outright with no warning).
+  // navigateTo/replaceScreen below push a matching history entry per screen
+  // level, so popstate firing one level "back" in real browser history
+  // lines up with popping exactly one level off screenStack.
+  useEffect(() => {
+    window.history.replaceState({ lectureRecorderScreen: true }, "", window.location.href);
+    // A single tagged entry isn't enough on its own: on a genuinely fresh
+    // launch with no in-app navigation yet, that's the ONLY entry this
+    // document owns, so the very first back press would go straight past
+    // it to whatever real page/state came before this app ever loaded —
+    // a cross-document navigation, which never fires popstate at all (it
+    // can't be intercepted after the fact). Pushing one extra self-referential
+    // entry right away guarantees the first-ever back press still lands on
+    // a same-document state (this one), which DOES fire popstate — giving
+    // the handler below a chance to run before anything real happens.
+    window.history.pushState({ lectureRecorderScreen: true }, "", window.location.href);
+
+    function handlePopState() {
+      if (screenStackRef.current.length > 1) {
+        setScreenStack((stack) => (stack.length > 1 ? stack.slice(0, -1) : stack));
+        return;
+      }
+
+      // Already at the root ("카테고리") screen — this popstate is the
+      // browser having just navigated back one entry, which would otherwise
+      // exit the app outright. First press: cancel that by immediately
+      // pushing the entry right back, and show the "한 번 더 누르면
+      // 종료" warning instead. Second press within the window: actually
+      // exit — see below for why that needs one more explicit back() call,
+      // not just leaving this popstate's own consumption alone.
+      if (exitArmedRef.current) {
+        if (exitTimerRef.current !== null) window.clearTimeout(exitTimerRef.current);
+        exitArmedRef.current = false;
+        setShowExitToast(false);
+        // This popstate only consumed the single buffer entry the first
+        // press pushed — from the user's perspective that's invisible (same
+        // screen, nothing to see), not an actual exit. One more back() is
+        // what actually reaches (or, if this app truly owns the bottom of
+        // the stack, re-attempts past) a real exit: in a standalone/TWA PWA
+        // this is the signal that tells the native shell the web history is
+        // now exhausted and it should finish the activity, rather than the
+        // app just quietly sitting on an empty back-stack until a third
+        // press. Harmless no-op if there's genuinely nothing left.
+        window.history.back();
+        return;
+      }
+
+      exitArmedRef.current = true;
+      setShowExitToast(true);
+      window.history.pushState({ lectureRecorderScreen: true }, "", window.location.href);
+      exitTimerRef.current = window.setTimeout(() => {
+        exitArmedRef.current = false;
+        setShowExitToast(false);
+      }, 2000);
+    }
+
+    window.addEventListener("popstate", handlePopState);
+    return () => {
+      window.removeEventListener("popstate", handlePopState);
+      if (exitTimerRef.current !== null) window.clearTimeout(exitTimerRef.current);
+    };
+  }, []);
 
   const refreshSessions = useCallback(() => {
     listSessions().then(setSessions).catch(() => {});
@@ -153,14 +232,27 @@ export function LectureStudio() {
 
   function navigateTo(next: Screen) {
     setScreenStack((stack) => [...stack, next]);
+    // One real history entry per screen level, so a later physical/gesture
+    // back press (popstate — see the effect above) has something to walk
+    // back through one level at a time, matching screenStack's own depth.
+    window.history.pushState({ lectureRecorderScreen: true }, "", window.location.href);
   }
 
   function replaceScreen(next: Screen) {
     setScreenStack((stack) => [...stack.slice(0, -1), next]);
+    // Doesn't grow the stack, so it shouldn't grow browser history either —
+    // e.g. finishing a new recording swaps "record" for "detail" in place;
+    // back from there should return to the category list, not to the
+    // now-irrelevant in-progress recording screen.
+    window.history.replaceState({ lectureRecorderScreen: true }, "", window.location.href);
   }
 
+  // Routed through the browser's own back navigation rather than popping
+  // screenStack directly, so an in-app back button and the physical/gesture
+  // back action both end up going through the exact same popstate handler
+  // above — one code path, instead of two that could drift out of sync.
   function goBack() {
-    setScreenStack((stack) => (stack.length > 1 ? stack.slice(0, -1) : stack));
+    window.history.back();
   }
 
   function handleNewRecording(presetCategory: string) {
@@ -360,6 +452,14 @@ export function LectureStudio() {
           onEmptyTrash={handleEmptyTrash}
           onClose={() => setShowTrash(false)}
         />
+      )}
+
+      {showExitToast && (
+        <div className="safe-pb fixed inset-x-0 bottom-6 z-50 flex justify-center px-4">
+          <p className="rounded-full bg-zinc-900/95 px-4 py-3 text-center text-sm text-white shadow-lg dark:bg-zinc-800/95">
+            뒤로가기 버튼을 한 번 더 누르면 앱이 종료됩니다.
+          </p>
+        </div>
       )}
     </div>
   );
