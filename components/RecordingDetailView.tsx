@@ -9,7 +9,14 @@ import { KeywordTagInput } from "@/components/KeywordTagInput";
 import { ReattachAudioPrompt } from "@/components/ReattachAudioPrompt";
 import { ReferenceDocDropzone } from "@/components/ReferenceDocDropzone";
 import { ReviewPanel } from "@/components/ReviewPanel";
-import { clearStoredJobId, getStoredJobId, pollJobUntilDone, setStoredJobId, startAnalysisJob } from "@/lib/analysisJob";
+import {
+  POLL_TIMEOUT_MESSAGE,
+  clearStoredJobId,
+  getStoredJobId,
+  pollJobUntilDone,
+  setStoredJobId,
+  startAnalysisJob,
+} from "@/lib/analysisJob";
 import { probeAudioDurationMs } from "@/lib/audio";
 import { loadSessionById, loadSlideImages, saveSession, saveSlideImages } from "@/lib/db";
 import { formatDateTime, formatFileSize } from "@/lib/format";
@@ -78,6 +85,14 @@ export function RecordingDetailView({
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analyzeProgress, setAnalyzeProgress] = useState("");
   const [analyzeError, setAnalyzeError] = useState<string | null>(null);
+  // Separate from analyzeError's inline box (which keeps whatever specific
+  // message the server/poll-timeout actually produced) — this is
+  // specifically the attention-grabbing, generically-worded toast requested
+  // for "polling gave up on this job" (either it timed out or the server
+  // reported a real failure), auto-dismissing rather than staying pinned to
+  // the analyze button the way analyzeError does.
+  const [pollFailureToast, setPollFailureToast] = useState<string | null>(null);
+  const pollFailureToastTimerRef = useRef<number | null>(null);
 
   const [keywords, setKeywords] = useState<string[]>([]);
   const [referenceFileNames, setReferenceFileNames] = useState<string[]>([]);
@@ -111,6 +126,7 @@ export function RecordingDetailView({
   useEffect(() => {
     return () => {
       if (syncToastTimerRef.current) window.clearTimeout(syncToastTimerRef.current);
+      if (pollFailureToastTimerRef.current) window.clearTimeout(pollFailureToastTimerRef.current);
     };
   }, []);
 
@@ -327,7 +343,15 @@ export function RecordingDetailView({
       let stageIndex = 0;
       setAnalyzeProgress(PROGRESS_STAGES[0]);
       try {
-        const result = await pollJobUntilDone(jobId, () => {
+        const result = await pollJobUntilDone(jobId, (status) => {
+          // A chunked job (route.ts's runChunkedAnalysisJob, for long
+          // recordings) reports real progress text ("청크 2/5 처리
+          // 중...") — prefer that verbatim when present; otherwise fall
+          // back to cycling through the generic fixed stages as before.
+          if (status.status === "processing" && status.stage) {
+            setAnalyzeProgress(status.stage);
+            return;
+          }
           stageIndex = Math.min(stageIndex + 1, PROGRESS_STAGES.length - 1);
           setAnalyzeProgress(PROGRESS_STAGES[stageIndex]);
         });
@@ -357,6 +381,14 @@ export function RecordingDetailView({
       } catch (error) {
         clearStoredJobId(sessionId);
         setAnalyzeError(error instanceof Error ? error.message : "분석 중 알 수 없는 오류가 발생했습니다.");
+        // Covers both ways this can fail: pollJobUntilDone's own MAX_POLL_MS
+        // timeout, and the server explicitly writing an "error" job record
+        // — either way, the loading UI needs to release immediately (the
+        // finally block below does that) and the user needs an unmissable
+        // signal, not just the quieter inline box near the analyze button.
+        setPollFailureToast(POLL_TIMEOUT_MESSAGE);
+        if (pollFailureToastTimerRef.current) window.clearTimeout(pollFailureToastTimerRef.current);
+        pollFailureToastTimerRef.current = window.setTimeout(() => setPollFailureToast(null), 5000);
       } finally {
         isPollingRef.current = false;
         setIsAnalyzing(false);
@@ -409,7 +441,7 @@ export function RecordingDetailView({
       // approach was still vulnerable to that: the client connection itself
       // gets suspended by the OS, independent of anything the server does).
       setAnalyzeProgress("서버 분석 요청 중...");
-      const jobId = await startAnalysisJob({ audioBlob, referenceBlobs, bookmarks, keywords, slideThumbnails });
+      const jobId = await startAnalysisJob({ audioBlob, referenceBlobs, bookmarks, keywords, slideThumbnails, durationMs });
       // Persisted before polling starts, not after — if the tab gets
       // backgrounded or closed between these two lines, the job is still
       // recoverable on next open (see the mount effect below).
@@ -691,6 +723,14 @@ export function RecordingDetailView({
       {syncToast && (
         <div className="fixed right-4 top-16 z-50 max-w-sm rounded-xl bg-zinc-900 px-4 py-3 text-sm text-white shadow-lg dark:bg-zinc-800">
           {syncToast}
+        </div>
+      )}
+
+      {pollFailureToast && (
+        <div className="safe-pb fixed inset-x-0 bottom-6 z-50 flex justify-center px-4">
+          <p className="max-w-sm rounded-full bg-red-600 px-4 py-3 text-center text-sm text-white shadow-lg dark:bg-red-700">
+            {pollFailureToast}
+          </p>
         </div>
       )}
     </div>

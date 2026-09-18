@@ -22,18 +22,37 @@ export type AnalyzeRequestPayload = {
   bookmarks: unknown[];
   keywords: string[];
   slideThumbnails: unknown[];
+  // Drives the server's chunking decision (CHUNK_THRESHOLD_MS in route.ts)
+  // — see RecordingDetailView.tsx, which already tracks this for display.
+  durationMs: number;
 };
 
+// createdAt is on every variant (route.ts's JobRecord always writes it) —
+// pollJobUntilDone uses it as the poll timeout's origin point (see
+// MAX_POLL_MS) so the 15-minute budget is anchored to when the job actually
+// started, not to whenever this particular tab happened to begin/resume
+// polling it.
 type JobStatusResponse =
-  | { status: "processing" }
-  | { status: "completed"; result: AnalysisJobResult }
-  | { status: "error"; error: string };
+  | { status: "processing"; createdAt: number; stage?: string }
+  | { status: "completed"; createdAt: number; result: AnalysisJobResult }
+  | { status: "error"; createdAt: number; error: string };
 
 const ACTIVE_JOB_KEY_PREFIX = "lecture-recorder:activeJob:";
 // Matched to the server's own job TTL (see JOB_TTL_SECONDS in route.ts) —
 // polling every 4s is frequent enough to feel responsive without hammering
 // Redis on a job that can run for minutes.
 const POLL_INTERVAL_MS = 4000;
+
+// A hard ceiling on how long the client will keep waiting on a job before
+// giving up and surfacing an error — even a very long, chunked recording
+// (see route.ts's runChunkedAnalysisJob) should comfortably finish well
+// inside this, so exceeding it means something's actually gone wrong
+// server-side without ever managing to write a "error" job record (e.g. the
+// Function process got hard-killed by a maxDuration cutoff or OOM before its
+// own catch block could run — nothing server-side can guarantee catching
+// that, so the client has to independently stop waiting on its own).
+const MAX_POLL_MS = 15 * 60 * 1000;
+export const POLL_TIMEOUT_MESSAGE = "대용량 파일 처리 중 에러가 발생했습니다. 다시 시도해 주세요.";
 
 // A backgrounded mobile tab doesn't just stop making progress on its own —
 // browsers throttle (Chrome) or fully suspend (iOS Safari/PWA) a hidden
@@ -129,7 +148,9 @@ async function fetchJobStatus(jobId: string): Promise<JobStatusResponse> {
 // check so the caller can drive a "still working" UI. Safe to call after a
 // page reload/reopen — this only ever reads current status from Redis, so
 // picking it back up mid-job (or after it already finished while nobody was
-// watching) behaves the same as watching it the whole time.
+// watching) behaves the same as watching it the whole time. Throws
+// POLL_TIMEOUT_MESSAGE if the job is still "processing" MAX_POLL_MS after
+// its own createdAt — see that constant for why this exists at all.
 export async function pollJobUntilDone(
   jobId: string,
   onTick?: (status: JobStatusResponse) => void,
@@ -140,6 +161,7 @@ export async function pollJobUntilDone(
     onTick?.(status);
     if (status.status === "completed") return status.result;
     if (status.status === "error") throw new Error(status.error);
+    if (Date.now() - status.createdAt > MAX_POLL_MS) throw new Error(POLL_TIMEOUT_MESSAGE);
     await delayOrWake(POLL_INTERVAL_MS);
   }
 }
