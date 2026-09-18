@@ -81,6 +81,15 @@ export type LectureSession = {
   // change that the existing "newest updatedAt wins" logic already handles
   // correctly.
   deletedAt: number | null;
+  // Manual drag-to-reorder position within a category (see
+  // components/CategoryListView.tsx) — higher sorts first, same direction
+  // as updatedAt so a never-reordered list looks identical to before this
+  // field existed (see lib/db.ts's listSessions). A single global number
+  // rather than per-category: filtering to one category and sorting by it
+  // already produces a correct per-category order on its own, without
+  // needing to track a separate position per category a session could move
+  // through.
+  sortOrder: number;
 };
 
 export type LectureSessionSummary = {
@@ -91,6 +100,7 @@ export type LectureSessionSummary = {
   durationMs: number;
   hasAiResult: boolean;
   deletedAt: number | null;
+  sortOrder: number;
 };
 
 export type ChecklistFeedItem = ChecklistItem & {

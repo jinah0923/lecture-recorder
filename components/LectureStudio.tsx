@@ -11,12 +11,14 @@ import { TrashModal } from "@/components/TrashModal";
 import { WeeklyChecklist } from "@/components/WeeklyChecklist";
 import { purgeSessionBlobs } from "@/lib/blobUpload";
 import {
+  compareBySortOrder,
   listAllChecklistItems,
   listDeletedSessions,
   listSessions,
   loadCategories,
   permanentlyDeleteSession,
   purgeExpiredTrash,
+  reorderSession,
   restoreSession,
   saveCategories,
   softDeleteSession,
@@ -198,6 +200,18 @@ export function LectureStudio() {
     await syncNow();
   }
 
+  // Optimistic — the reordered position shows immediately (dnd-kit already
+  // visually settled it before this even fires), IndexedDB and the cloud
+  // catch up right after rather than gating the UI on either round trip.
+  async function handleReorderSession(id: string, sortOrder: number) {
+    const now = Date.now();
+    setSessions((prev) =>
+      prev.map((session) => (session.id === id ? { ...session, sortOrder, updatedAt: now } : session)).sort(compareBySortOrder),
+    );
+    await reorderSession(id, sortOrder);
+    await syncNow();
+  }
+
   async function handleEmptyTrash() {
     if (trashedSessions.length === 0) return;
     if (
@@ -296,6 +310,7 @@ export function LectureStudio() {
             onSelectSession={handleSelectSession}
             onDeleteSession={handleMoveToTrash}
             onNewRecording={() => handleNewRecording(screen.category)}
+            onReorderSession={handleReorderSession}
           />
         )}
 

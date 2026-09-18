@@ -69,6 +69,11 @@ export function RecordingDetailView({
   // triggered by some other path can never silently clear a session's trash
   // state just because this component doesn't know about it.
   const [deletedAt, setDeletedAt] = useState<number | null>(null);
+  // Round-tripped for the same reason as deletedAt above — an autosave from
+  // this component must never silently reset a session's drag-to-reorder
+  // position back to some default just because this view doesn't otherwise
+  // care about ordering (see components/CategoryListView.tsx).
+  const [sortOrder, setSortOrder] = useState<number>(() => Date.now());
   const [aiResult, setAiResult] = useState<AiResult | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analyzeProgress, setAnalyzeProgress] = useState("");
@@ -125,6 +130,7 @@ export function RecordingDetailView({
       setAudioFileName(session.audioFileName);
       setAudioMimeType(session.audioMimeType);
       setDeletedAt(session.deletedAt ?? null);
+      setSortOrder(session.sortOrder ?? session.updatedAt);
       setBookmarks(session.bookmarks);
       setKeywords(session.keywords ?? []);
       // A session saved before multi-file support only has the old singular
@@ -159,6 +165,7 @@ export function RecordingDetailView({
       audioFileName,
       audioMimeType,
       deletedAt,
+      sortOrder,
       bookmarks,
       keywords,
       referenceFileNames,
@@ -174,6 +181,7 @@ export function RecordingDetailView({
       audioFileName,
       audioMimeType,
       deletedAt,
+      sortOrder,
       bookmarks,
       keywords,
       referenceFileNames,

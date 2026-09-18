@@ -26,8 +26,28 @@ async function requireUserEmail(): Promise<string | null> {
 // deliberately here too since they're base64 image data large enough to blow
 // through Redis's free-tier storage cap, same reasoning as audio.
 function stripToSyncableFields(session: LectureSession): LectureSession {
-  const { id, title, category, createdAt, updatedAt, durationMs, audioFileName, audioMimeType, bookmarks, keywords, referenceFileNames, aiResult, deletedAt } = session;
-  return { id, title, category, createdAt, updatedAt, durationMs, audioFileName, audioMimeType, bookmarks, keywords, referenceFileNames, aiResult, deletedAt: deletedAt ?? null };
+  const { id, title, category, createdAt, updatedAt, durationMs, audioFileName, audioMimeType, bookmarks, keywords, referenceFileNames, aiResult, deletedAt, sortOrder } = session;
+  return {
+    id,
+    title,
+    category,
+    createdAt,
+    updatedAt,
+    durationMs,
+    audioFileName,
+    audioMimeType,
+    bookmarks,
+    keywords,
+    referenceFileNames,
+    aiResult,
+    deletedAt: deletedAt ?? null,
+    // Falls back the same way lib/db.ts's effectiveSortOrder does — a
+    // session synced from before this field existed shouldn't serialize as
+    // sortOrder: undefined (JSON.stringify would just drop the key, which
+    // is harmless here, but computing a real number keeps this function's
+    // output shape honest with LectureSession's own non-nullable type).
+    sortOrder: sortOrder ?? updatedAt,
+  };
 }
 
 export async function GET() {

@@ -61,6 +61,10 @@ export function NewRecordingView({
       referenceFileNames: [],
       aiResult: null,
       deletedAt: null,
+      // Same clock as updatedAt below — a freshly-created session naturally
+      // sorts to the top of its category, same as it always has, until the
+      // user actually drags something (see components/CategoryListView.tsx).
+      sortOrder: now.getTime(),
     };
 
     saveSession(session).then(() => {

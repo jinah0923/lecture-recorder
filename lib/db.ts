@@ -119,6 +119,22 @@ export async function purgeExpiredTrash(): Promise<LectureSession[]> {
   return expired;
 }
 
+// A session saved before drag-to-reorder existed has no sortOrder at all —
+// falling back to updatedAt (same units/direction: higher sorts first)
+// means a category nobody has ever manually reordered looks exactly like it
+// did before this feature existed, rather than jumping to some arbitrary
+// order the first time these rows are read.
+function effectiveSortOrder(row: LectureSession | LectureSessionSummary): number {
+  return row.sortOrder ?? row.updatedAt;
+}
+
+// Exported so components/LectureStudio.tsx can re-sort its in-memory
+// summaries the exact same way after an optimistic drag-reorder update,
+// instead of duplicating (and risking drifting from) this comparator.
+export function compareBySortOrder(a: LectureSessionSummary, b: LectureSessionSummary): number {
+  return effectiveSortOrder(b) - effectiveSortOrder(a) || b.updatedAt - a.updatedAt;
+}
+
 function toSummary(row: LectureSession): LectureSessionSummary {
   return {
     id: row.id,
@@ -128,7 +144,20 @@ function toSummary(row: LectureSession): LectureSessionSummary {
     durationMs: row.durationMs ?? 0,
     hasAiResult: Boolean(row.aiResult),
     deletedAt: row.deletedAt ?? null,
+    sortOrder: effectiveSortOrder(row),
   };
+}
+
+// Sets a session's manual sort position — see lib/types.ts's sortOrder for
+// the gap-based scheme (components/CategoryListView.tsx computes the actual
+// midpoint/edge value; this just persists whatever it decided). Bumping
+// updatedAt alongside it is what makes the new position survive a
+// cross-device merge (lib/sync.ts) the same way every other field edit
+// already does.
+export async function reorderSession(id: string, sortOrder: number): Promise<void> {
+  const session = await loadSessionById(id);
+  if (!session) return;
+  await saveSession({ ...session, sortOrder, updatedAt: Date.now() });
 }
 
 export async function listSessions(): Promise<LectureSessionSummary[]> {
@@ -139,10 +168,7 @@ export async function listSessions(): Promise<LectureSessionSummary[]> {
     const request = store.getAll();
     request.onsuccess = () => {
       const rows = request.result as LectureSession[];
-      const summaries = rows
-        .filter((row) => !row.deletedAt)
-        .map(toSummary)
-        .sort((a, b) => b.updatedAt - a.updatedAt);
+      const summaries = rows.filter((row) => !row.deletedAt).map(toSummary).sort(compareBySortOrder);
       resolve(summaries);
     };
     request.onerror = () => reject(request.error);
