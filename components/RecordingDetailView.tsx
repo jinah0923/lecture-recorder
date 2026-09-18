@@ -519,15 +519,22 @@ export function RecordingDetailView({
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-4">
       <div>
+        {/* Icon-only and pinned to the far left, with the title block
+            stacked below rather than beside it — same reasoning as
+            LectureStudio.tsx's shared header: nothing here should ever be
+            able to reach the top-center area where iPadOS floats its Split
+            View "..." pill, regardless of how long the recording's title
+            gets. */}
         <button
           type="button"
           onClick={onBack}
-          className="-ml-1 mb-2 inline-flex min-h-[44px] items-center gap-1 px-1 text-sm font-medium text-zinc-600 transition hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+          aria-label="목록으로 돌아가기"
+          title="목록으로 돌아가기"
+          className="-ml-1 mb-4 flex h-12 w-12 items-center justify-center rounded-full text-zinc-600 transition hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
         >
-          <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
+          <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2">
             <path d="M15 18l-6-6 6-6" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
-          목록으로 돌아가기
         </button>
         <input
           value={title}

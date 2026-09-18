@@ -354,20 +354,30 @@ export function LectureStudio() {
     <div className="header-safe-pt min-h-screen px-4 pb-6 sm:px-6 lg:px-8">
       <div className="mx-auto flex min-h-[calc(100vh-3rem)] max-w-5xl flex-col">
         {screen.kind !== "detail" && (
-          <header className="mb-5 flex items-center gap-3">
+          // The back button sits alone on its own row and the title block
+          // is always stacked below it, rather than side-by-side in one
+          // row — a long category name in a side-by-side layout could grow
+          // wide enough to reach the top-center area where iPadOS floats
+          // its Split View "..." multitasking pill, and no amount of
+          // truncation tuning guarantees that never happens across every
+          // title length/viewport width. Stacking rules it out structurally:
+          // nothing in this header is ever positioned anywhere but the far
+          // left, full stop.
+          <header className="mb-5">
             {screen.kind !== "albums" && (
               <button
                 type="button"
                 onClick={goBack}
                 aria-label="뒤로가기"
-                className="flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-full border border-slate-200 bg-white text-zinc-600 transition hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                title="뒤로가기"
+                className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full border border-slate-200 bg-white text-zinc-600 transition hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800"
               >
-                <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
+                <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2">
                   <path d="M15 18l-6-6 6-6" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
               </button>
             )}
-            <div className="min-w-0">
+            <div className={`min-w-0 ${screen.kind !== "albums" ? "mt-4" : ""}`}>
               <p className="text-xs font-medium uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
                 Lecture studio
               </p>
