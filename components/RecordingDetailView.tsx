@@ -19,6 +19,7 @@ import {
   startAnalysisJob,
 } from "@/lib/analysisJob";
 import { probeAudioDurationMs } from "@/lib/audio";
+import { shouldChunk, splitAudioInBrowser } from "@/lib/audioChunking";
 import {
   cacheAudioBlob,
   deleteCachedAudioBlob,
@@ -501,16 +502,45 @@ export function RecordingDetailView({
       // works even if localAudio was never recovered (IndexedDB cache lost
       // too, no reattach yet) — resuming genuinely doesn't need it.
       let audioBlob: UploadedBlobRef | null = null;
+      let audioChunks: Array<UploadedBlobRef & { startMs: number }> | undefined;
       if (hasSttCheckpoint) {
         setAnalyzeProgress("이전 STT 결과를 불러오는 중...");
       } else {
-        setAnalyzeProgress("오디오 업로드 중...");
-        audioBlob = await uploadFileToBlob(
-          localAudio!.blob,
-          localAudio!.name || "audio",
-          localAudio!.mimeType || "audio/webm",
-          (fraction) => setAnalyzeProgress(`오디오 업로드 중... (${Math.round(fraction * 100)}%)`),
-        );
+        const audio = localAudio!;
+        const audioName = audio.name || "audio";
+        const audioMime = audio.mimeType || "audio/webm";
+        // Long recordings are split HERE in the browser (ffmpeg.wasm) and
+        // each piece uploaded separately — the server never receives the
+        // whole file, so no server-side ffmpeg/disk/memory/duration limit
+        // applies (see lib/audioChunking.ts).
+        const effectiveDurationMs = durationMs || audio.durationMs;
+        if (shouldChunk(effectiveDurationMs)) {
+          setAnalyzeProgress("오디오 분할 준비 중...");
+          const pieces = await splitAudioInBrowser(
+            audio.blob,
+            audioName,
+            audioMime,
+            effectiveDurationMs,
+            (done, total) => setAnalyzeProgress(`오디오 분할 중 (${Math.min(done + 1, total)}/${total})...`),
+          );
+          audioChunks = [];
+          for (let index = 0; index < pieces.length; index++) {
+            const piece = pieces[index];
+            const uploaded = await uploadFileToBlob(
+              piece.blob,
+              piece.fileName,
+              piece.mimeType,
+              (fraction) =>
+                setAnalyzeProgress(`오디오 조각 업로드 중 (${index + 1}/${pieces.length}) ${Math.round(fraction * 100)}%`),
+            );
+            audioChunks.push({ ...uploaded, startMs: piece.startMs });
+          }
+        } else {
+          setAnalyzeProgress("오디오 업로드 중...");
+          audioBlob = await uploadFileToBlob(audio.blob, audioName, audioMime, (fraction) =>
+            setAnalyzeProgress(`오디오 업로드 중... (${Math.round(fraction * 100)}%)`),
+          );
+        }
       }
 
       const referenceBlobs: UploadedBlobRef[] = [];
@@ -537,11 +567,11 @@ export function RecordingDetailView({
       const jobId = await startAnalysisJob({
         sessionId,
         audioBlob,
+        audioChunks,
         referenceBlobs,
         bookmarks,
         keywords,
         slideThumbnails,
-        durationMs,
       });
       // Persisted before polling starts, not after — if the tab gets
       // backgrounded or closed between these two lines, the job is still
@@ -550,6 +580,7 @@ export function RecordingDetailView({
 
       await resumeJobPolling(jobId);
     } catch (error) {
+      console.error("분석 시작 실패:", error);
       setAnalyzeError(error instanceof Error ? error.message : "분석 중 알 수 없는 오류가 발생했습니다.");
       setIsAnalyzing(false);
       setAnalyzeProgress("");

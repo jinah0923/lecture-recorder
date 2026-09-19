@@ -2,14 +2,6 @@ import { NextResponse, after } from "next/server";
 import { del, get } from "@vercel/blob";
 import { ApiError, GoogleGenAI, Type, createPartFromBase64, createPartFromUri, createUserContent } from "@google/genai";
 import type { File as GenAiFile, Part } from "@google/genai";
-import { spawn } from "node:child_process";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-// ffmpeg-static ships no type declarations; its default export is just a
-// string path to the bundled platform binary (or null on an unsupported
-// platform/arch — see its own index.js). TS falls back to `any` for it.
-import ffmpegPath from "ffmpeg-static";
 import { getRedisClient, isRedisConfigured } from "@/lib/redis";
 
 // Node.js, not Edge — this route now talks to Redis via ioredis (see
@@ -90,6 +82,8 @@ type IncomingBlobRef = {
 };
 
 type BlobRef = { url: string; fileName: string; mimeType: string };
+// One browser-made slice of a long recording (see lib/audioChunking.ts).
+type AudioChunkRef = BlobRef & { startMs: number };
 
 type AnalyzeRequestBody = {
   // Identifies the recording across separate job attempts — required so a
@@ -106,12 +100,10 @@ type AnalyzeRequestBody = {
   bookmarks?: unknown;
   keywords?: unknown;
   slideThumbnails?: unknown;
-  // Client-measured, not re-probed server-side (see CHUNK_THRESHOLD_MS below)
-  // — this only ever drives a coarse "should we chunk" decision and how many
-  // ~20-minute pieces to cut, not anything requiring frame accuracy, so
-  // trusting the browser's own duration reading (already used elsewhere for
-  // the session's durationMs) is cheap and good enough.
-  durationMs?: unknown;
+  // Present instead of audioBlob for long recordings the browser split up
+  // (see lib/audioChunking.ts). startMs is each piece's offset into the
+  // original recording, used to shift its transcript timestamps back.
+  audioChunks?: unknown;
 };
 
 type AnalysisResult = {
@@ -173,13 +165,13 @@ const JOB_TTL_SECONDS = 24 * 60 * 60;
 // without keeping (potentially large) transcript text in Redis forever.
 const STT_CHECKPOINT_TTL_SECONDS = 24 * 60 * 60;
 
-// Above this, the raw audio never goes to Gemini as one file — see
-// splitAudioFile/runChunkedAnalysisJob below. 30 minutes is comfortably
-// under whatever a single STT call could plausibly handle within the 300s
-// function budget on its own, so this is deliberately conservative rather
-// than tuned to the exact edge of what fails.
-const CHUNK_THRESHOLD_MS = 30 * 60 * 1000;
-const CHUNK_DURATION_MS = 20 * 60 * 1000;
+// Long recordings are split into ~20-minute pieces IN THE BROWSER
+// (lib/audioChunking.ts, ffmpeg.wasm) before upload — this Function never
+// splits audio itself (no server-side ffmpeg binary exists on Vercel's
+// runtime). It just receives the pieces as separate blobs (audioChunks)
+// and transcribes each one. Cap guards this public route against absurd
+// inputs; 12 x 20min = 4h.
+const MAX_AUDIO_CHUNKS = 12;
 
 const NO_SPEECH_TRANSCRIPT = "감지된 음성 내용이 없습니다.";
 const NO_SPEECH_SUMMARY = "오디오에서 명확한 강의 음성을 찾을 수 없습니다.";
@@ -463,111 +455,6 @@ async function uploadFileToGemini(
     throw new Error("파일 업로드 응답을 확인하지 못했습니다.");
   }
   return finalFile;
-}
-
-// Reads a chunk file ffmpeg wrote to local disk (see splitAudioFile) and
-// uploads it through the same resumable-upload path as everything else —
-// chunks are typically small enough not to need the multi-chunk loop inside
-// uploadFileToGemini to do more than a single pass, but reusing it keeps
-// this consistent with the rest of the upload handling rather than a
-// separate one-shot codepath.
-async function uploadLocalFileToGemini(apiKey: string, filePath: string, displayName: string, mimeType: string): Promise<GenAiFile> {
-  const buffer = await readFile(filePath);
-  const blob = new Blob([buffer], { type: mimeType });
-  return uploadFileToGemini(apiKey, blob, displayName, mimeType);
-}
-
-// Best-effort filename -> extension guess, falling back to the mime type's
-// subtype. Only used to give ffmpeg's chunk output files a container that
-// matches the source (see splitAudioFile) — `-c copy` needs the output
-// container to actually be compatible with the input's codec, so a chunk
-// has to keep the same container as the original file, not some fixed
-// extension.
-function guessAudioExtension(fileName: string, mimeType: string): string {
-  const match = fileName.match(/\.([a-zA-Z0-9]+)$/);
-  if (match) return match[1].toLowerCase();
-  const subtype = mimeType.split("/")[1]?.split(";")[0];
-  return subtype || "webm";
-}
-
-// Downloads a client-uploaded Vercel Blob straight to a local temp file
-// (server-to-server — no CORS or Vercel body-size constraint applies here)
-// rather than handing it to Gemini directly, since ffmpeg (splitAudioFile
-// below) needs a real file on disk to read from. Only used on the chunked
-// path — the direct (non-chunked) path still goes through
-// downloadAndUploadToGemini below without ever touching disk.
-async function downloadBlobToFile(blobUrl: string, destPath: string): Promise<void> {
-  const blobResult = await get(blobUrl, { access: "private" });
-  if (!blobResult) {
-    throw new Error("업로드된 파일을 찾을 수 없습니다. 다시 시도해주세요.");
-  }
-  const arrayBuffer = await new Response(blobResult.stream).arrayBuffer();
-  await writeFile(destPath, Buffer.from(arrayBuffer));
-}
-
-type AudioChunk = { path: string; startMs: number };
-
-// Cuts [startMs, startMs + durationMs) out of inputPath into outputPath
-// using the bundled static ffmpeg binary (ffmpeg-static), without
-// re-encoding (-c copy) — fast, lossless, and avoids needing to know the
-// right codec settings for whatever format the source audio happens to be.
-// -ss before -i trades a little seek precision (it can snap to the nearest
-// keyframe) for speed; a boundary landing a second or so off is harmless
-// here since chunk transcripts are just concatenated afterward, not
-// sample-diffed against anything.
-async function runFfmpegChunk(inputPath: string, outputPath: string, startMs: number, durationMs: number): Promise<void> {
-  if (!ffmpegPath) {
-    throw new Error("ffmpeg 실행 파일을 찾을 수 없습니다 (지원되지 않는 서버 플랫폼).");
-  }
-  try {
-    // Vercel's file tracing occasionally ships a traced binary without the
-    // executable bit intact — cheap to just always re-assert it rather than
-    // find out at spawn time.
-    await chmod(ffmpegPath, 0o755);
-  } catch {
-    // Already executable (the common case, e.g. local dev) — nothing to do.
-  }
-
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(ffmpegPath as unknown as string, [
-      "-y",
-      "-ss",
-      String(startMs / 1000),
-      "-i",
-      inputPath,
-      "-t",
-      String(durationMs / 1000),
-      "-c",
-      "copy",
-      outputPath,
-    ]);
-    let stderr = "";
-    child.stderr?.on("data", (data: Buffer) => {
-      stderr += data.toString();
-    });
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`ffmpeg 청크 분할 실패 (exit ${code}): ${stderr.slice(-500)}`));
-    });
-  });
-}
-
-// Splits a long audio file into CHUNK_DURATION_MS-sized pieces on disk. The
-// last chunk's requested -t duration may run past the file's actual end
-// (totalDurationMs is the client's own reading, not re-probed here) —
-// ffmpeg just stops at EOF in that case, which is exactly the desired
-// behavior, not an error.
-async function splitAudioFile(inputPath: string, totalDurationMs: number, workDir: string, extension: string): Promise<AudioChunk[]> {
-  const chunkCount = Math.max(1, Math.ceil(totalDurationMs / CHUNK_DURATION_MS));
-  const chunks: AudioChunk[] = [];
-  for (let i = 0; i < chunkCount; i++) {
-    const startMs = i * CHUNK_DURATION_MS;
-    const outputPath = join(workDir, `chunk-${i}.${extension}`);
-    await runFfmpegChunk(inputPath, outputPath, startMs, CHUNK_DURATION_MS);
-    chunks.push({ path: outputPath, startMs });
-  }
-  return chunks;
 }
 
 // Downloads a client-uploaded Vercel Blob (server-to-server — no CORS or
@@ -996,8 +883,8 @@ async function uploadReferenceFiles(ai: GoogleGenAI, apiKey: string, referenceBl
   return uploadedReferences;
 }
 
-// The original, still-default path for anything at or under
-// CHUNK_THRESHOLD_MS — unchanged from before chunking existed: the whole
+// The path for recordings the browser did not need to split (a single
+// audioBlob, see lib/audioChunking.ts CHUNK_THRESHOLD_MS): the whole
 // audio file goes to Gemini once, and both workers run against it directly
 // and in parallel. Runs inside after() (see POST), fully decoupled from
 // whatever the client's connection is doing by that point.
@@ -1095,56 +982,31 @@ async function runDirectAnalysisJob(
   return buildAnalysisResult(sttResult.script, sttResult.hasSpeech === true, analysisResult);
 }
 
-// The chunked path for anything over CHUNK_THRESHOLD_MS — see the file-level
-// architecture comment for why this exists at all: one Gemini call against
-// 90 minutes of audio risks both this Function's own 300s budget and
-// whatever practical limits Gemini's own audio understanding has, so this
-// downloads the source once, cuts it into CHUNK_DURATION_MS pieces on disk
-// with ffmpeg, transcribes each piece as its own small, independent STT
-// call (in parallel — wall-clock time is what's actually budget-constrained
-// here, not aggregate work), and only then runs the analysis worker once
-// against the merged, already-accurate transcript text — not the raw audio
-// again, which would just re-expose that same worker to the same risk this
-// whole path exists to avoid.
+// The chunked path for long recordings — the browser already split the audio
+// into ~20-minute pieces and uploaded each as its own blob (see
+// lib/audioChunking.ts), so this Function never handles the whole
+// recording at once: each piece is transcribed as its own small,
+// independent STT call (in parallel — wall-clock time is what's actually
+// budget-constrained here, not aggregate work), and only then does the
+// analysis worker run once against the merged, already-accurate transcript
+// text — not the raw audio again, which would just re-expose that worker to
+// the very duration risk this path exists to avoid.
 async function runChunkedAnalysisJob(
   apiKey: string,
   jobId: string,
   sessionId: string,
-  audioBlobRef: BlobRef,
+  audioChunks: AudioChunkRef[],
   referenceBlobRefs: BlobRef[],
   bookmarks: IncomingBookmark[],
   keywords: string[],
   slideThumbnails: IncomingSlideThumbnail[],
-  durationMs: number,
 ): Promise<AnalysisResult> {
   const ai = new GoogleGenAI({ apiKey });
-  const workDir = await mkdtemp(join(tmpdir(), "lecture-chunks-"));
   const uploadedChunkFiles: GenAiFile[] = [];
   let uploadedReferences: GenAiFile[] = [];
 
   try {
-    await reportStage(jobId, "긴 오디오 분할 중...");
-    const inputPath = join(workDir, "source-input");
-    const extension = guessAudioExtension(audioBlobRef.fileName, audioBlobRef.mimeType);
-    const properInputPath = `${inputPath}.${extension}`;
-
-    console.log("[transcribe-and-summarize] downloading audio blob for chunked splitting", {
-      fileName: audioBlobRef.fileName,
-      durationMs,
-    });
-    try {
-      await downloadBlobToFile(audioBlobRef.url, properInputPath);
-    } finally {
-      await del(audioBlobRef.url).catch(() => {});
-    }
-
-    let chunks: AudioChunk[];
-    try {
-      chunks = await splitAudioFile(properInputPath, durationMs, workDir, extension);
-    } catch (error) {
-      throw new Error(`오디오 분할 실패: ${error instanceof Error ? error.message : String(error)}`);
-    }
-
+    const chunks = audioChunks;
     uploadedReferences = await uploadReferenceFiles(ai, apiKey, referenceBlobRefs);
 
     // Each chunk gets its own small STT call, run in parallel — this is
@@ -1156,11 +1018,13 @@ async function runChunkedAnalysisJob(
     let completedChunks = 0;
     const chunkResults = await Promise.all(
       chunks.map(async (chunk, index) => {
-        const chunkFile = await uploadLocalFileToGemini(
+        // downloadAndUploadToGemini also deletes the chunk's blob once
+        // Gemini has the bytes.
+        const chunkFile = await downloadAndUploadToGemini(
           apiKey,
-          chunk.path,
+          chunk.url,
           `chunk-${index}`,
-          audioBlobRef.mimeType || "audio/webm",
+          chunk.mimeType || "audio/webm",
         );
         const activeFile = await waitForFileActive(ai, chunkFile);
         uploadedChunkFiles.push(activeFile);
@@ -1239,7 +1103,9 @@ async function runChunkedAnalysisJob(
   } finally {
     await Promise.all(uploadedChunkFiles.map((file) => deleteUploadedFile(ai, file)));
     await Promise.all(uploadedReferences.map((file) => deleteUploadedFile(ai, file)));
-    await rm(workDir, { recursive: true, force: true }).catch(() => {});
+    // Chunk blobs normally get deleted right after download; this covers the
+    // ones a failure kept us from ever reaching.
+    await Promise.all(audioChunks.map((chunk) => del(chunk.url).catch(() => {})));
   }
 }
 
@@ -1294,8 +1160,8 @@ async function runAnalysisOnlyFromCheckpoint(
 
 // Dispatches to: a checkpoint resume (STAGE 2 only, if a prior attempt for
 // this session already completed STT — see SttCheckpoint), or else the
-// chunked/direct STAGE 1+2 path based on the client-reported duration (see
-// CHUNK_THRESHOLD_MS). The checkpoint check always comes first — it's what
+// chunked (browser-split audioChunks) or direct (single audioBlob) STAGE 1+2 path.
+// The checkpoint check always comes first — it's what
 // makes a retry after a stage-2 failure skip STT regardless of how long the
 // recording is.
 async function runAnalysisJob(
@@ -1307,17 +1173,17 @@ async function runAnalysisJob(
   bookmarks: IncomingBookmark[],
   keywords: string[],
   slideThumbnails: IncomingSlideThumbnail[],
-  durationMs: number,
+  audioChunks: AudioChunkRef[],
 ): Promise<AnalysisResult> {
   const checkpoint = await readSttCheckpoint(sessionId);
   if (checkpoint) {
     return runAnalysisOnlyFromCheckpoint(apiKey, jobId, checkpoint, referenceBlobRefs, bookmarks, keywords, slideThumbnails);
   }
+  if (audioChunks.length > 0) {
+    return runChunkedAnalysisJob(apiKey, jobId, sessionId, audioChunks, referenceBlobRefs, bookmarks, keywords, slideThumbnails);
+  }
   if (!audioBlobRef) {
     throw new Error("오디오 파일 업로드 정보가 없어 분석을 시작할 수 없습니다. 파일을 다시 첨부해주세요.");
-  }
-  if (durationMs > CHUNK_THRESHOLD_MS) {
-    return runChunkedAnalysisJob(apiKey, jobId, sessionId, audioBlobRef, referenceBlobRefs, bookmarks, keywords, slideThumbnails, durationMs);
   }
   return runDirectAnalysisJob(apiKey, sessionId, audioBlobRef, referenceBlobRefs, bookmarks, keywords, slideThumbnails);
 }
@@ -1359,7 +1225,21 @@ export async function POST(request: Request) {
   // knows this in advance via checkSttCheckpoint and skips the upload, so
   // this is re-checked here rather than trusted from the client alone.
   const audioBlobRef = body.audioBlob ? parseBlobRef(body.audioBlob) : null;
-  if (!audioBlobRef && !(await readSttCheckpoint(sessionId))) {
+  const rawChunks = Array.isArray(body.audioChunks) ? body.audioChunks : [];
+  if (rawChunks.length > MAX_AUDIO_CHUNKS) {
+    return NextResponse.json({ error: `오디오 조각은 최대 ${MAX_AUDIO_CHUNKS}개까지 지원합니다.` }, { status: 400 });
+  }
+  const audioChunks: AudioChunkRef[] = [];
+  for (const raw of rawChunks) {
+    const ref = parseBlobRef(raw);
+    const startMs = (raw as { startMs?: unknown } | null)?.startMs;
+    if (!ref || typeof startMs !== "number" || !Number.isFinite(startMs) || startMs < 0) {
+      return NextResponse.json({ error: "오디오 조각 정보가 올바르지 않습니다." }, { status: 400 });
+    }
+    audioChunks.push({ ...ref, startMs });
+  }
+  audioChunks.sort((a, b) => a.startMs - b.startMs);
+  if (!audioBlobRef && audioChunks.length === 0 && !(await readSttCheckpoint(sessionId))) {
     return NextResponse.json(
       { error: "오디오 파일 업로드 정보가 전달되지 않았습니다. 파일을 다시 첨부해주세요." },
       { status: 400 },
@@ -1387,7 +1267,6 @@ export async function POST(request: Request) {
           item && typeof item.page === "number" && typeof item.dataUrl === "string",
       )
     : [];
-  const durationMs = typeof body.durationMs === "number" && Number.isFinite(body.durationMs) ? body.durationMs : 0;
 
   const jobId = crypto.randomUUID();
   await writeJobRecord(jobId, { status: "processing", createdAt: Date.now() });
@@ -1403,7 +1282,7 @@ export async function POST(request: Request) {
         bookmarks,
         keywords,
         slideThumbnails,
-        durationMs,
+        audioChunks,
       );
       await writeJobRecord(jobId, { status: "completed", createdAt: Date.now(), result });
       // The checkpoint's only job was protecting against a STAGE 2 failure
@@ -1413,7 +1292,7 @@ export async function POST(request: Request) {
       await deleteSttCheckpoint(sessionId);
     } catch (error) {
       // Covers every error this route's own code can throw and catch —
-      // Gemini failures, ffmpeg failures, upload failures, all already
+      // Gemini failures, upload failures, all already
       // surface here via the try/catches inside runAnalysisJob's two paths.
       // What this can NEVER catch is the Function process itself being
       // killed outright (a hard maxDuration cutoff or an OOM kill) — there's

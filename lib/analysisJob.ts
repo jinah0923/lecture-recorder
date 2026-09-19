@@ -26,13 +26,13 @@ export type AnalyzeRequestPayload = {
   // RecordingDetailView skips the (possibly large) upload entirely rather
   // than uploading it just to have the server ignore it.
   audioBlob: BlobRefPayload | null;
+  // Set instead of audioBlob for long recordings the browser split up (see
+  // lib/audioChunking.ts). startMs = the piece's offset into the recording.
+  audioChunks?: Array<BlobRefPayload & { startMs: number }>;
   referenceBlobs: BlobRefPayload[];
   bookmarks: unknown[];
   keywords: string[];
   slideThumbnails: unknown[];
-  // Drives the server's chunking decision (CHUNK_THRESHOLD_MS in route.ts)
-  // — see RecordingDetailView.tsx, which already tracks this for display.
-  durationMs: number;
 };
 
 // createdAt is on every variant (route.ts's JobRecord always writes it) —

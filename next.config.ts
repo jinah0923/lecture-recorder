@@ -1,15 +1,6 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // ffmpeg-static resolves its bundled binary's path via `path.join(__dirname,
-  // "ffmpeg")` (see node_modules/ffmpeg-static/index.js) — if webpack bundles
-  // that file into a .next/server/vendor-chunks/ chunk, __dirname resolves to
-  // the CHUNK's location instead of the real node_modules/ffmpeg-static/
-  // directory, so the binary is never found (ENOENT) despite existing on
-  // disk. Keeping it external (unbundled, required at its real path at
-  // runtime) is the standard fix and matches how @vercel/blob-style native
-  // binaries are meant to be consumed under Next.js's file tracing.
-  serverExternalPackages: ["ffmpeg-static"],
   // Route Handlers (app/api/**/route.ts) have no Next.js-level body size cap
   // at all — the old Pages Router `export const config = { api: { bodyParser:
   // { sizeLimit } } }` knob doesn't exist for App Router route handlers, so
