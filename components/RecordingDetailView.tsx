@@ -608,6 +608,35 @@ export function RecordingDetailView({
     setAiResult((current) => (current ? { ...current, lectureNote: nextLectureNote } : current));
   }, []);
 
+  // The manual-edit "저장" button's explicit save path — unlike
+  // updateLectureNote above (an optimistic state update the debounced
+  // autosave effect catches up to ~300ms later), this persists immediately:
+  // a deliberate save click deserves the same "don't risk losing it to a
+  // navigate-away in that window" treatment resumeJobPolling already gives a
+  // finished analysis job, for the exact same reason.
+  const saveLectureNoteNow = useCallback(
+    async (nextLectureNote: string) => {
+      // setAiResult's updater runs synchronously (React computes the next
+      // state immediately even though the resulting re-render is deferred),
+      // so nextAiResult is already populated by the time setAiResult itself
+      // returns below — this is what lets the rest of this function safely
+      // await building on top of it, matching resumeJobPolling's own
+      // immediate-save shape.
+      let nextAiResult: AiResult | null = null;
+      setAiResult((current) => {
+        if (!current) return current;
+        nextAiResult = { ...current, lectureNote: nextLectureNote };
+        return nextAiResult;
+      });
+      if (!nextAiResult) return;
+      const session = buildSessionSnapshot({ aiResult: nextAiResult });
+      await saveSession(session);
+      onSessionSaved();
+      await pushLocalSessions().catch(() => {});
+    },
+    [buildSessionSnapshot, onSessionSaved],
+  );
+
   const updateTranscript = useCallback((nextTranscript: TranscriptSegment[]) => {
     setAiResult((current) => (current ? { ...current, transcript: nextTranscript } : current));
   }, []);
@@ -750,6 +779,7 @@ export function RecordingDetailView({
           onSeek={seekTo}
           onUpdateChecklist={updateChecklist}
           onUpdateLectureNote={updateLectureNote}
+          onSaveLectureNoteNow={saveLectureNoteNow}
           onUpdateTranscript={updateTranscript}
           onSegmentCommitted={handleSegmentCommitted}
           slideImages={slideImagesMap}

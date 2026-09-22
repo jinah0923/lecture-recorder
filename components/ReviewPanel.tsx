@@ -20,6 +20,13 @@ type ReviewPanelProps = {
   onSeek: (ms: number) => void;
   onUpdateChecklist: (nextChecklist: ChecklistItem[]) => void;
   onUpdateLectureNote: (nextLectureNote: string) => void;
+  /** Explicit "저장" from manual-edit mode below — unlike onUpdateLectureNote
+   * (an optimistic state update the caller's own debounced autosave catches
+   * up to later), this persists immediately: a deliberate save action
+   * deserves the same "don't wait on a debounce that might lose the edit to
+   * a navigate-away" treatment RecordingDetailView already gives a finished
+   * analysis job. */
+  onSaveLectureNoteNow: (nextLectureNote: string) => Promise<void>;
   onUpdateTranscript: (nextTranscript: TranscriptSegment[]) => void;
   onSegmentCommitted?: (oldText: string, newText: string) => void;
   /** Page number -> cached slide image, for `![슬라이드 N](slide_N)` placeholders. */
@@ -65,12 +72,56 @@ export function ReviewPanel({
   onSeek,
   onUpdateChecklist,
   onUpdateLectureNote,
+  onSaveLectureNoteNow,
   onUpdateTranscript,
   onSegmentCommitted,
   slideImages,
 }: ReviewPanelProps) {
   const [summaryCopyLabel, setSummaryCopyLabel] = useState("클립보드 복사");
   const [noteCopyLabel, setNoteCopyLabel] = useState("클립보드 복사");
+
+  // Manual-edit mode for the lecture note — operates on aiResult.lectureNote
+  // (the full, untouched markdown), never on LectureNote's own paginated
+  // slice, so saving can never truncate the note down to whatever page
+  // happened to be on screen.
+  const [isEditingNote, setIsEditingNote] = useState(false);
+  const [noteDraft, setNoteDraft] = useState("");
+  const [isSavingNote, setIsSavingNote] = useState(false);
+  const noteTextareaRef = useRef<HTMLTextAreaElement>(null);
+
+  function autoResizeNoteTextarea() {
+    const el = noteTextareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }
+
+  function startEditingNote() {
+    setNoteDraft(aiResult.lectureNote);
+    setIsEditingNote(true);
+  }
+
+  // Runs once the textarea actually mounts (its content, and therefore
+  // scrollHeight, isn't there yet on the same tick as setIsEditingNote).
+  useEffect(() => {
+    if (isEditingNote) autoResizeNoteTextarea();
+  }, [isEditingNote]);
+
+  function cancelEditingNote() {
+    setIsEditingNote(false);
+    setNoteDraft("");
+  }
+
+  async function saveEditingNote() {
+    setIsSavingNote(true);
+    try {
+      await onSaveLectureNoteNow(noteDraft);
+      setIsEditingNote(false);
+      setNoteDraft("");
+    } finally {
+      setIsSavingNote(false);
+    }
+  }
 
   const [expandQuestion, setExpandQuestion] = useState("");
   const [expandImage, setExpandImage] = useState<AttachedImage | null>(null);
@@ -296,9 +347,51 @@ export function ReviewPanel({
             >
               🗂️ 노션으로 내보내기
             </button>
+            {!isEditingNote && (
+              <button
+                type="button"
+                onClick={startEditingNote}
+                className="rounded-full border border-slate-200 px-3 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              >
+                ✏️ 노트 직접 수정
+              </button>
+            )}
           </div>
         </div>
-        <LectureNote markdown={aiResult.lectureNote} slideImages={slideImages} />
+        {isEditingNote ? (
+          <div className="flex flex-col gap-2">
+            <textarea
+              ref={noteTextareaRef}
+              value={noteDraft}
+              onChange={(event) => {
+                setNoteDraft(event.target.value);
+                autoResizeNoteTextarea();
+              }}
+              className="w-full resize-none overflow-hidden rounded-xl border border-indigo-200 bg-white p-3 font-mono text-sm leading-relaxed text-zinc-900 outline-none focus:border-indigo-400 dark:border-indigo-900 dark:bg-zinc-900 dark:text-zinc-100"
+              placeholder="상세 강의노트를 마크다운으로 직접 작성/수정하세요."
+            />
+            <div className="flex justify-end gap-1.5">
+              <button
+                type="button"
+                onClick={cancelEditingNote}
+                disabled={isSavingNote}
+                className="rounded-full border border-slate-200 px-4 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                onClick={saveEditingNote}
+                disabled={isSavingNote}
+                className="rounded-full bg-indigo-600 px-4 py-1.5 text-xs font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {isSavingNote ? "저장 중..." : "저장"}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <LectureNote markdown={aiResult.lectureNote} slideImages={slideImages} />
+        )}
 
         <div className="mt-3 border-t border-zinc-100 pt-3 dark:border-zinc-800">
           <p className="mb-1.5 text-xs font-medium text-zinc-500 dark:text-zinc-400">🔍 더 알고 싶은 심화정보 / 추가 질문</p>
@@ -331,7 +424,7 @@ export function ReviewPanel({
             <button
               type="button"
               onClick={() => imageInputRef.current?.click()}
-              disabled={!aiResult.lectureNote}
+              disabled={!aiResult.lectureNote || isEditingNote}
               aria-label="이미지 첨부"
               title="이미지 첨부 (사진/구조식/도표)"
               className="shrink-0 rounded-lg border border-slate-200 px-2.5 text-base text-zinc-500 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
@@ -349,21 +442,22 @@ export function ReviewPanel({
               }}
               onPaste={handleQuestionPaste}
               placeholder="[누락 내용 추가 / 심화 개념 / 구조식 요청] 예: 전사 과정 중 스플라이싱 내용이 빠졌어, 표 형태로 정리해서 추가해 줘."
-              disabled={!aiResult.lectureNote}
+              disabled={!aiResult.lectureNote || isEditingNote}
               className="flex-1 rounded-lg border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-900 outline-none focus:border-indigo-300 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
             />
             <button
               type="button"
               onClick={handleRequestExpansion}
-              disabled={isExpanding || !expandQuestion.trim() || !aiResult.lectureNote}
+              disabled={isExpanding || !expandQuestion.trim() || !aiResult.lectureNote || isEditingNote}
               className="shrink-0 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {isExpanding ? "탐구 중..." : "AI 심화 탐구 요청"}
             </button>
           </div>
           <p className="mt-1.5 text-[11px] text-zinc-400 dark:text-zinc-500">
-            💡 강의 내용 중 보강하고 싶은 학술 개념, 심층 원리, 실생활 예시를 입력하거나 사진(구조식/도표)을 첨부하면
-            강의노트의 적절한 위치에 제안 블록을 생성합니다. 이미지는 붙여넣기(Ctrl+V)로도 첨부할 수 있습니다.
+            {isEditingNote
+              ? "✏️ 노트를 직접 수정하는 중에는 사용할 수 없어요 — 저장하거나 취소한 뒤 이용해주세요."
+              : "💡 강의 내용 중 보강하고 싶은 학술 개념, 심층 원리, 실생활 예시를 입력하거나 사진(구조식/도표)을 첨부하면 강의노트의 적절한 위치에 제안 블록을 생성합니다. 이미지는 붙여넣기(Ctrl+V)로도 첨부할 수 있습니다."}
           </p>
           {expandError && <p className="mt-1.5 text-xs text-red-600 dark:text-red-400">{expandError}</p>}
           {draftBlocks.length > 0 && !showModal && (
