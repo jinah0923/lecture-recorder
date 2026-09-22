@@ -330,6 +330,25 @@ export async function deleteCachedAudioBlob(sessionId: string): Promise<void> {
   await runTransaction(AUDIO_CACHE_STORE, "readwrite", (store) => store.delete(sessionId));
 }
 
+// Renames a category everywhere it's referenced — category names are the
+// only identity a category has in this app (no separate id/row), so a
+// rename has to cascade to every session currently filed under oldName,
+// not just the categories list itself. Bumps each affected session's
+// updatedAt so the rename wins on cross-device merge the same way any other
+// field edit already does (see lib/sync.ts). If newName collides with an
+// existing category, the two simply merge (oldName's sessions join it)
+// rather than erroring.
+export async function renameCategory(oldName: string, newName: string): Promise<void> {
+  const [allSessions, existingCategories] = await Promise.all([loadAllSessions(), loadCategories()]);
+  const now = Date.now();
+  const affected = allSessions.filter((session) => session.category === oldName);
+  await Promise.all(affected.map((session) => saveSession({ ...session, category: newName, updatedAt: now })));
+
+  const withoutOld = existingCategories.filter((name) => name !== oldName);
+  const nextCategories = withoutOld.includes(newName) ? withoutOld : [...withoutOld, newName];
+  await saveCategories(nextCategories);
+}
+
 export async function loadCategories(): Promise<string[]> {
   const db = await openDb();
   return new Promise<string[]>((resolve, reject) => {

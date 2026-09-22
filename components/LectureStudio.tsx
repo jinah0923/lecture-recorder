@@ -18,6 +18,7 @@ import {
   loadCategories,
   permanentlyDeleteSession,
   purgeExpiredTrash,
+  renameCategory,
   reorderSession,
   restoreSession,
   saveCategories,
@@ -53,6 +54,13 @@ export function LectureStudio() {
     null,
   );
   const [showExitToast, setShowExitToast] = useState(false);
+  // Inline category-rename state — only ever relevant while screen.kind is
+  // "category" (see the header below); kept here rather than in a separate
+  // component since it needs direct access to categories/sessions/
+  // screenStack to update all three optimistically on commit.
+  const [editingCategoryName, setEditingCategoryName] = useState(false);
+  const [categoryNameDraft, setCategoryNameDraft] = useState("");
+  const categoryNameInputRef = useRef<HTMLInputElement>(null);
 
   // popstate's handler is registered once (see the effect below) and would
   // otherwise close over the screenStack from that first render — this
@@ -176,6 +184,73 @@ export function LectureStudio() {
       return next;
     });
   }, []);
+
+  // Renames a category in place — updates every session filed under it, the
+  // categories list, and any screen-stack entry still holding the old name
+  // (so the header and a later "뒤로가기" both immediately reflect it),
+  // all optimistically before the IndexedDB write (renameCategory) or the
+  // cloud push (refreshAll, below) ever resolve.
+  const handleRenameCategory = useCallback(
+    async (oldName: string, newName: string) => {
+      setCategories((prev) => {
+        const withoutOld = prev.filter((name) => name !== oldName);
+        return withoutOld.includes(newName) ? withoutOld : [...withoutOld, newName];
+      });
+      setSessions((prev) =>
+        prev.map((session) => (session.category === oldName ? { ...session, category: newName } : session)),
+      );
+      setScreenStack((stack) =>
+        stack.map((entry) =>
+          (entry.kind === "category" || entry.kind === "record") && entry.category === oldName
+            ? { ...entry, category: newName }
+            : entry,
+        ),
+      );
+      try {
+        await renameCategory(oldName, newName);
+      } catch {
+        // Optimistic UI already committed above (matches this file's other
+        // mutations, e.g. handleReorderSession) — a failed local write just
+        // means the next refreshAll/mergeAndSync reconciles from whatever
+        // IndexedDB actually ended up with.
+      }
+      refreshAll();
+    },
+    [refreshAll],
+  );
+
+  function startEditingCategoryName(currentName: string) {
+    setCategoryNameDraft(currentName);
+    setEditingCategoryName(true);
+  }
+
+  useEffect(() => {
+    if (editingCategoryName) {
+      categoryNameInputRef.current?.focus();
+      categoryNameInputRef.current?.select();
+    }
+  }, [editingCategoryName]);
+
+  // Navigating away (e.g. a hardware/gesture back press, which can pop the
+  // screen stack without ever firing the input's blur) must not leave a
+  // stale "editing" flag armed — otherwise reopening any category later
+  // would jump straight into edit mode with a leftover draft.
+  useEffect(() => {
+    setEditingCategoryName(false);
+  }, [screen]);
+
+  // Fired from the input's onBlur — both "탭하여 편집 종료" (tapping outside)
+  // and Enter (which just blurs the input, see the input's onKeyDown below)
+  // funnel through here, so there's exactly one commit path rather than two
+  // that could double-fire.
+  function commitCategoryNameEdit() {
+    setEditingCategoryName(false);
+    if (screen.kind !== "category") return;
+    const oldName = screen.category;
+    const newName = categoryNameDraft.trim();
+    if (!newName || newName === oldName) return;
+    void handleRenameCategory(oldName, newName);
+  }
 
   useEffect(() => {
     // Auto Purge — runs once up front so a trashed session past its 30-day
@@ -381,9 +456,48 @@ export function LectureStudio() {
               <p className="text-xs font-medium uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
                 Lecture studio
               </p>
-              <h1 className="mt-1 truncate text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">
-                {headerTitle}
-              </h1>
+              {screen.kind === "category" && editingCategoryName ? (
+                <input
+                  ref={categoryNameInputRef}
+                  type="text"
+                  value={categoryNameDraft}
+                  onChange={(event) => setCategoryNameDraft(event.target.value)}
+                  onBlur={commitCategoryNameEdit}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      // Blurring (not committing directly here) keeps this
+                      // to a single commit path — see commitCategoryNameEdit.
+                      event.currentTarget.blur();
+                    } else if (event.key === "Escape") {
+                      setEditingCategoryName(false);
+                    }
+                  }}
+                  className="mt-1 w-full truncate border-b-2 border-indigo-400 bg-transparent text-2xl font-semibold tracking-tight text-zinc-900 outline-none dark:border-indigo-600 dark:text-zinc-100"
+                />
+              ) : (
+                <h1
+                  className={`mt-1 flex min-w-0 items-center gap-1.5 text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-100 ${
+                    screen.kind === "category" ? "cursor-pointer" : ""
+                  }`}
+                  onClick={() => screen.kind === "category" && startEditingCategoryName(screen.category)}
+                >
+                  <span className="truncate">{headerTitle}</span>
+                  {screen.kind === "category" && (
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        startEditingCategoryName(screen.category);
+                      }}
+                      aria-label="과목명 수정"
+                      title="과목명 수정"
+                      className="shrink-0 text-base text-zinc-400 transition hover:text-indigo-500 dark:text-zinc-500 dark:hover:text-indigo-400"
+                    >
+                      ✏️
+                    </button>
+                  )}
+                </h1>
+              )}
             </div>
           </header>
         )}
