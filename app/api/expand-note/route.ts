@@ -6,7 +6,19 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 
 const MODEL = "gemini-3.6-flash";
-const MAX_NOTE_LENGTH = 20_000;
+// Sized for a lossless multi-hour note (the transcribe-and-summarize prompt
+// forbids compressing the lecture note, so a 90-minute lecture can run well
+// past what the old 20k cap allowed) — still bounded, since this is a public
+// route.
+const MAX_NOTE_LENGTH = 300_000;
+// The recording's full timestamped transcript — the primary grounding source
+// (see the strict-grounding rules in the system instruction below).
+const MAX_TRANSCRIPT_LENGTH = 400_000;
+// Client-downscaled slide thumbnails (lib/pdfSlides.ts buildSlideThumbnails),
+// the persisted stand-in for the attached PDF — the PDF blob itself is never
+// kept after analysis, only its rendered pages.
+const MAX_SLIDES = 80;
+const NOT_FOUND_MESSAGE = "제공된 강의 자료와 녹음본에서는 해당 내용을 찾을 수 없습니다.";
 const MAX_QUESTION_LENGTH = 500;
 // Comfortably under Gemini's ~20MB total inline-request ceiling — this is a
 // single attached photo (chemical structure, slide, handwriting), not a
@@ -17,6 +29,12 @@ const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 const RESPONSE_SCHEMA = {
   type: Type.OBJECT,
   properties: {
+    foundInSources: {
+      type: Type.BOOLEAN,
+      description:
+        "요청한 내용이 제공된 [강의 녹음 스크립트] / 강의 슬라이드 이미지 / 학습자 첨부 이미지 / [기존 강의노트] 안에 실제로 " +
+        "존재하면 true. 이 자료들 어디에도 근거가 없어 외부 지식으로만 답할 수 있는 경우 반드시 false",
+    },
     anchorText: {
       type: Type.STRING,
       description:
@@ -28,10 +46,11 @@ const RESPONSE_SCHEMA = {
       description:
         "기존 강의노트에 자연스럽게 이어붙일 완성형 마크다운 블록. 절대 '① 개념 정의 ② 심층 설명 ③ 실생활 예시' 같은 " +
         "고정 텍스트 템플릿을 강제하지 말 것 — 대신 기존 강의노트에서 이미 쓰인 마크다운 스타일(표, 불릿, 콜아웃, " +
-        "헤딩 등)을 그대로 따라 작성. 사진/그림/구조식이 필요하면 마크다운 이미지(![설명](URL))를 적극 사용",
+        "헤딩 등)을 그대로 따라 작성. 오직 제공된 녹음 스크립트/슬라이드/첨부 이미지/기존 노트에 있는 내용만 사용(외부 지식 금지). " +
+        "시각 자료는 ![슬라이드 N](slide_N) 또는 학습자 첨부 이미지 URL만 사용",
     },
   },
-  required: ["anchorText", "title", "content"],
+  required: ["foundInSources", "anchorText", "title", "content"],
 };
 
 // Mirrors app/api/transcribe-and-summarize/route.ts's LATEX_BAN_RULE — this
@@ -41,6 +60,16 @@ const RESPONSE_SCHEMA = {
 const LATEX_BAN_RULE =
   "화살표나 기호를 작성할 때 절대 LaTeX 문법(예: \\rightarrow, $...$ 등 백슬래시 명령어나 달러 기호로 감싼 수식)을 " +
   "사용하지 마십시오. 반드시 일반 텍스트 기호(예: ->, =>, →, ≥, ≤, ±)만 사용하십시오.";
+
+type IncomingSlideThumbnail = { page: number; dataUrl: string };
+
+// Same helper as transcribe-and-summarize's — slide thumbnails arrive as
+// client-rendered data URLs and go to Gemini inline.
+function dataUrlToPart(dataUrl: string): Part | null {
+  const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+  if (!match) return null;
+  return createPartFromBase64(match[2], match[1]);
+}
 
 function fixEscapedNewlines(text: string): string {
   return text.replace(/\\n/g, "\n");
@@ -109,7 +138,7 @@ export async function POST(request: Request) {
     );
   }
 
-  let body: { lectureNote?: unknown; question?: unknown; imageUrl?: unknown };
+  let body: { lectureNote?: unknown; question?: unknown; imageUrl?: unknown; transcript?: unknown; slideThumbnails?: unknown };
   try {
     body = await request.json();
   } catch {
@@ -119,6 +148,15 @@ export async function POST(request: Request) {
   const lectureNote = typeof body.lectureNote === "string" ? body.lectureNote.trim() : "";
   const question = typeof body.question === "string" ? body.question.trim() : "";
   const imageUrl = typeof body.imageUrl === "string" ? body.imageUrl.trim() : "";
+  const transcript = typeof body.transcript === "string" ? body.transcript.trim() : "";
+  const slideThumbnails: IncomingSlideThumbnail[] = Array.isArray(body.slideThumbnails)
+    ? body.slideThumbnails
+        .filter(
+          (item): item is IncomingSlideThumbnail =>
+            item && typeof item.page === "number" && typeof item.dataUrl === "string",
+        )
+        .sort((a, b) => a.page - b.page)
+    : [];
 
   if (!lectureNote) {
     return NextResponse.json(
@@ -131,6 +169,12 @@ export async function POST(request: Request) {
   }
   if (lectureNote.length > MAX_NOTE_LENGTH) {
     return NextResponse.json({ error: "강의노트가 너무 깁니다." }, { status: 413 });
+  }
+  if (transcript.length > MAX_TRANSCRIPT_LENGTH) {
+    return NextResponse.json({ error: "녹음 스크립트가 너무 깁니다." }, { status: 413 });
+  }
+  if (slideThumbnails.length > MAX_SLIDES) {
+    return NextResponse.json({ error: `슬라이드는 최대 ${MAX_SLIDES}장까지만 참고할 수 있습니다.` }, { status: 400 });
   }
   if (question.length > MAX_QUESTION_LENGTH) {
     return NextResponse.json(
@@ -161,7 +205,16 @@ export async function POST(request: Request) {
     "반드시 지정된 JSON 스키마 형식으로만, 한국어로 응답하세요.",
     "먼저 학습자 질문의 의도를 파악하세요 — 예: 누락된 내용 추가, 기존 설명의 오류/부족한 부분 보완·수정, 특정 " +
       "양식(표/목록/단계별 정리 등)으로 변환 요청, 심화 개념 확장 요청 등. 그 의도에 정확히 맞는 내용을 작성하세요. " +
-      "무관한 내용을 지어내지 말고, 정확하고 교육적인 내용만 작성하세요.",
+      "무관한 내용을 지어내지 마세요.",
+    "[엄격한 출처 제한(Strict Grounding) — 최우선 규칙] 당신이 사용할 수 있는 정보원은 오직 아래 네 가지뿐입니다: " +
+      "(1) [강의 녹음 스크립트], (2) 함께 첨부된 강의 슬라이드 이미지, (3) 학습자가 첨부한 이미지(있는 경우), " +
+      "(4) [기존 강의노트]. 당신이 사전 학습한 외부 전공 지식, 교과서 지식, 일반 상식을 끌어와 내용을 보충하거나 " +
+      "새로 지어내는 것은 엄격히 금지됩니다 — 그 지식이 사실로서 정확하더라도 이 네 자료에 없다면 쓰지 마세요. " +
+      "\"누락된 내용을 추가해줘\"라는 요청은 \"노트에 빠졌지만 녹음/자료에는 실제로 있는 내용을 찾아 옮겨줘\"라는 " +
+      "뜻입니다. 교수가 녹음에서 말한 표현·예시·수치와 슬라이드에 실제로 적힌 내용만 근거로 content를 작성하세요.",
+    "요청한 내용이 위 자료 어디에도 존재하지 않는다면 절대 지어내지 말고 foundInSources를 false로 응답하세요 " +
+      "(이 경우 anchorText/title/content는 빈 문자열로 두면 됩니다). 자료에 일부만 있다면 foundInSources는 true로 하되, " +
+      "content에는 자료에 실제로 있는 부분만 담고 없는 부분은 채워 넣지 마세요.",
     "anchorText는 아래 제공된 기존 강의노트 원문에 실제로 존재하는 문장이나 제목의 일부를 정확히 그대로(요약하거나 바꿔쓰지 말고) 인용해야 합니다. " +
       "이 블록이 삽입될 위치 바로 앞부분 — 즉 의미상 가장 자연스럽게 이어지는 지점을 고르세요.",
     "content는 절대로 '① 개념 정의 ② 심층 설명 ③ 실생활 예시' 같은 고정 텍스트 템플릿을 따르지 마세요. 대신 아래 " +
@@ -170,10 +223,8 @@ export async function POST(request: Request) {
       "그 자리에 써넣은 것처럼 자연스럽게 이어지는 완성형 블록을 작성하세요. 요청이 '표로 정리해줘'라면 표로, " +
       "'누락된 내용을 추가해줘'라면 그 자리에 원래 있었어야 할 문단처럼, '이 설명을 수정/보완해줘'라면 정정되거나 " +
       "보강된 설명 자체를 본문 톤 그대로 작성하세요 — 어떤 경우에도 별도 템플릿으로 도배하지 마세요.",
-    "사용자가 '사진', '그림', '구조식', '이미지' 등 시각 자료를 명시적으로 요청한 경우에는 실제로 존재한다고 확신할 수 " +
-      "있는 신뢰할 만한 외부 이미지 URL(예: Wikipedia/Wikimedia Commons처럼 안정적인 직접 이미지 파일 URL)을 마크다운 " +
-      "이미지 문법 `![설명](https://실제-이미지-URL)`으로 본문에 적극 삽입하세요. 확신할 수 없는 URL을 지어내지는 말고, " +
-      "그런 경우 어떤 자료를 찾아보면 좋을지 텍스트로 안내하세요.",
+    "시각 자료가 필요하면 외부 이미지 URL을 찾아 넣지 말고(외부 자료 금지), 제공된 강의 슬라이드를 `![슬라이드 N](slide_N)` " +
+      "형식(N은 해당 슬라이드 번호)으로 참조하거나, 학습자가 첨부한 이미지가 있으면 그 URL만 사용하세요.",
     imagePart
       ? "학습자가 이미지(사진)를 직접 첨부했습니다. 이 이미지의 내용(화학 구조식, 슬라이드 도표, 손글씨 메모 등)을 " +
         "자세히 분석해서 학습자의 질문에 답하는 설명을 작성하세요. 아래 [학습자가 첨부한 이미지]에 제공된 정확한 " +
@@ -197,6 +248,18 @@ export async function POST(request: Request) {
     "[기존 강의노트]",
     lectureNote,
     "",
+    "[강의 녹음 스크립트]",
+    transcript || "(스크립트가 제공되지 않았습니다 — 이 경우 [기존 강의노트]와 첨부 이미지만 근거로 사용하세요.)",
+    "",
+    ...(slideThumbnails.length > 0
+      ? [
+          "[강의 슬라이드]",
+          `이 텍스트 다음에 강의 슬라이드 이미지 ${slideThumbnails.length}장이 첨부되어 있습니다: ` +
+            slideThumbnails.map((slide) => `슬라이드 ${slide.page}`).join(", ") +
+            " 순서입니다(학습자 첨부 이미지가 있다면 그것이 슬라이드들보다 먼저 옵니다).",
+          "",
+        ]
+      : []),
     "[학습자의 요청]",
     question,
     "",
@@ -213,26 +276,38 @@ export async function POST(request: Request) {
       "아래 항목을 작성해주세요.",
     "1. content: 요청 의도에 맞는 완성형 마크다운 블록을 작성하세요. '① 개념 정의 ② 심층 설명 ③ 실생활 예시' 같은 " +
       "고정 템플릿은 절대 사용하지 말고, 위 [기존 강의노트]에서 이미 쓰이고 있는 마크다운 스타일(표/불릿/콜아웃/헤딩 " +
-      "등)을 그대로 따라, 원래 강의노트의 일부였던 것처럼 자연스럽게 작성하세요. 사진/그림/구조식이 필요하면 신뢰할 " +
-      "수 있는 이미지 URL을 마크다운 이미지로 첨부하고, 비교표가 필요하면 마크다운 표를 사용하세요. [원본 보존] " +
+      "등)을 그대로 따라, 원래 강의노트의 일부였던 것처럼 자연스럽게 작성하세요. 내용은 반드시 [강의 녹음 스크립트]·강의 슬라이드·" +
+      "첨부 이미지·[기존 강의노트]에서만 가져오세요(외부 지식 금지). 시각 자료는 해당 슬라이드를 ![슬라이드 N](slide_N)으로 " +
+      "참조하고, 비교표가 필요하면 마크다운 표를 사용하세요. [원본 보존] " +
       "content에는 [기존 강의노트]의 원문 문장을 그대로 옮겨 적지 마세요 — 이 블록은 anchorText 바로 뒤에 " +
       "추가(Append)될 새 내용일 뿐, 원문을 대체하는 용도가 아닙니다.",
     "2. title: 이 블록이 강의노트에 추가/반영하는 내용을 요약하는 짧은 제목을 지어주세요.",
     "3. anchorText: 위 [기존 강의노트] 원문 안에서, 이 내용이 삽입되기 가장 적합한 위치 바로 앞의 문장이나 제목을 원문 그대로 정확히 인용하세요.",
+    "4. foundInSources: 요청한 내용이 [강의 녹음 스크립트]/강의 슬라이드/첨부 이미지/[기존 강의노트] 안에 실제로 있으면 true, " +
+      "어디에도 없으면 false. false인데 외부 지식으로 content를 채우는 것은 금지입니다.",
   ].join("\n");
+
+  const contentParts: (string | Part)[] = [userPrompt];
+  if (imagePart) contentParts.push(imagePart);
+  for (const slide of slideThumbnails) {
+    const part = dataUrlToPart(slide.dataUrl);
+    if (part) contentParts.push(part);
+  }
 
   console.log("[expand-note] calling Gemini", {
     model: MODEL,
     lectureNoteChars: lectureNote.length,
     questionChars: question.length,
     hasImage: imagePart !== null,
+    transcriptChars: transcript.length,
+    slideCount: slideThumbnails.length,
   });
 
   let responseText: string | undefined;
   try {
     const response = await ai.models.generateContent({
       model: MODEL,
-      contents: imagePart ? createUserContent([userPrompt, imagePart]) : userPrompt,
+      contents: createUserContent(contentParts),
       config: {
         systemInstruction,
         responseMimeType: "application/json",
@@ -262,6 +337,7 @@ export async function POST(request: Request) {
   }
 
   let parsed: {
+    foundInSources?: unknown;
     anchorText?: unknown;
     title?: unknown;
     content?: unknown;
@@ -272,9 +348,16 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "AI 응답을 해석하는 데 실패했습니다. 다시 시도해주세요." }, { status: 502 });
   }
 
+  // Explicit false only — a missing field (schema drift) shouldn't silently
+  // throw away an otherwise-valid block.
+  const content = typeof parsed.content === "string" ? fixEscapedNewlines(parsed.content.trim()) : "";
+  if (parsed.foundInSources === false || !content) {
+    return NextResponse.json({ notFound: true, message: NOT_FOUND_MESSAGE });
+  }
+
   return NextResponse.json({
     anchorText: typeof parsed.anchorText === "string" ? fixEscapedNewlines(parsed.anchorText.trim()) : "",
     title: typeof parsed.title === "string" ? fixEscapedNewlines(parsed.title.trim()) : question,
-    content: typeof parsed.content === "string" ? fixEscapedNewlines(parsed.content.trim()) : "",
+    content,
   });
 }

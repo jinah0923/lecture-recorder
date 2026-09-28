@@ -8,6 +8,10 @@ type DeepDiveModalProps = {
   lectureNote: string;
   draftBlocks: DraftBlock[];
   isExpanding: boolean;
+  /** Result of the latest request (e.g. a refine that found nothing in the
+   * recording/slides) — shown here since the modal covers the panel's own
+   * message area. */
+  notice?: string | null;
   onConfirmBlock: (id: string) => void;
   onCancelBlock: (id: string) => void;
   onRefineBlock: (id: string, feedback: string) => void;
@@ -19,6 +23,7 @@ export function DeepDiveModal({
   lectureNote,
   draftBlocks,
   isExpanding,
+  notice,
   onConfirmBlock,
   onCancelBlock,
   onRefineBlock,
@@ -82,6 +87,9 @@ export function DeepDiveModal({
           <p className="mb-2 mt-4 text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
             새로 제안된 심화 탐구 블록
           </p>
+          {notice && (
+            <p className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-950/40 dark:text-amber-400">{notice}</p>
+          )}
           <div className="flex flex-col gap-3">
             {draftBlocks.map((block) => (
               <div key={block.id} className="rounded-xl border-2 border-violet-200 bg-violet-50 p-3 dark:border-violet-900/50 dark:bg-violet-950/30">

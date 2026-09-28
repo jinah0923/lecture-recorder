@@ -10,6 +10,7 @@ import { TranscriptPanel } from "@/components/TranscriptPanel";
 import { buildDeepDiveImageProxyUrl, uploadFileToBlob } from "@/lib/blobUpload";
 import { copyToClipboard, downloadTextFile } from "@/lib/export";
 import { renderMarkdown } from "@/lib/markdown";
+import { buildSlideThumbnails } from "@/lib/pdfSlides";
 import type { AiResult, ChecklistItem, DraftBlock, TranscriptSegment } from "@/lib/types";
 
 type AttachedImage = { file: File; previewUrl: string };
@@ -39,6 +40,43 @@ function buildSummaryExportContent(aiResult: AiResult) {
 
 function buildLectureNoteExportContent(aiResult: AiResult) {
   return ["# 상세 강의노트", "", aiResult.lectureNote || "상세 강의노트가 없습니다."].join("\n");
+}
+
+// The deep-dive endpoint is strictly grounded in the recording and slides
+// (app/api/expand-note/route.ts), so it needs the transcript itself, not
+// just the note derived from it. Timestamped so the model can tell where in
+// the lecture something was said.
+function buildTranscriptText(transcript: TranscriptSegment[]): string {
+  return transcript
+    .map((segment) => {
+      const totalSeconds = Math.max(0, Math.floor(segment.startMs / 1000));
+      const mm = String(Math.floor(totalSeconds / 60)).padStart(2, "0");
+      const ss = String(totalSeconds % 60).padStart(2, "0");
+      return `[${mm}:${ss}] ${segment.text}`;
+    })
+    .join("\n");
+}
+
+// Vercel rejects Function request bodies over 4.5MB before the route runs.
+// Text (note + transcript) is small in practice; slide thumbnails are the
+// bulk, so they get a budget and later pages are dropped past it.
+const SLIDE_PAYLOAD_BUDGET_CHARS = 3_000_000;
+
+async function buildGroundingSlides(slideImages: Map<number, string> | undefined) {
+  if (!slideImages || slideImages.size === 0) return [];
+  const slides = Array.from(slideImages, ([page, dataUrl]) => ({ page, dataUrl })).sort((a, b) => a.page - b.page);
+  const thumbnails = await buildSlideThumbnails(slides);
+  const kept: typeof thumbnails = [];
+  let used = 0;
+  for (const thumbnail of thumbnails) {
+    if (used + thumbnail.dataUrl.length > SLIDE_PAYLOAD_BUDGET_CHARS) {
+      console.warn(`[deep-dive] slide payload budget reached — sending ${kept.length}/${thumbnails.length} slides`);
+      break;
+    }
+    kept.push(thumbnail);
+    used += thumbnail.dataUrl.length;
+  }
+  return kept;
 }
 
 function buildDraftBlockMarkdown(block: DraftBlock): string {
@@ -187,11 +225,23 @@ export function ReviewPanel({
       const response = await fetch("/api/expand-note", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ lectureNote: aiResult.lectureNote, question, ...(imageUrl ? { imageUrl } : {}) }),
+        body: JSON.stringify({
+          lectureNote: aiResult.lectureNote,
+          question,
+          transcript: buildTranscriptText(aiResult.transcript),
+          slideThumbnails: await buildGroundingSlides(slideImages),
+          ...(imageUrl ? { imageUrl } : {}),
+        }),
       });
       const data = await response.json();
       if (!response.ok) {
         throw new Error(data?.error ?? "심화 탐구에 실패했습니다.");
+      }
+      // Nothing in the recording/slides backs this request — show the
+      // server's message instead of creating (or replacing) a draft block.
+      if (data?.notFound) {
+        setExpandError(typeof data.message === "string" ? data.message : "제공된 강의 자료와 녹음본에서는 해당 내용을 찾을 수 없습니다.");
+        return;
       }
       const newBlock: DraftBlock = {
         id: replaceBlockId ?? crypto.randomUUID(),
@@ -489,6 +539,7 @@ export function ReviewPanel({
           lectureNote={aiResult.lectureNote}
           draftBlocks={draftBlocks}
           isExpanding={isExpanding}
+          notice={expandError}
           onConfirmBlock={handleConfirmBlock}
           onCancelBlock={handleCancelBlock}
           onRefineBlock={handleRefineBlock}
