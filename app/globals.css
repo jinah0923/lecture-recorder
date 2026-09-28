@@ -65,22 +65,18 @@ body {
    header has nothing to react to there, so this guarantees a real minimum
    instead — max() so a device that separately reports a genuine safe-area
    inset (rounded corners, a landscape notch) still gets whichever is
-   larger, never double-counted with the floor. An earlier, shallower
-   version of this floor (1rem / 1.75rem) still wasn't enough clearance in
-   practice, hence the bigger numbers below. Viewport width is the only
-   usable proxy for "probably a tablet-width window" (a phone in
-   full-screen portrait is reliably under 640px; even a narrow-but-usable
-   iPad Split View pane for this app's fairly dense layout isn't), so the
-   floor only steps up past that breakpoint — a plain phone doesn't need 48px
-   of empty space up top and it would just look like a gap there. */
-.header-safe-pt {
-  padding-top: max(env(safe-area-inset-top, 0px), 1.5rem);
-}
+   larger, never double-counted with the floor.
 
-@media (min-width: 640px) {
-  .header-safe-pt {
-    padding-top: max(env(safe-area-inset-top, 0px), 3rem);
-  }
+   The 3rem (48px) floor applies at EVERY viewport width. An earlier version
+   only stepped up to 3rem past a 640px min-width breakpoint (24px below
+   it), on the theory that anything narrower was a phone — but a narrow
+   Split View / Slide Over pane on an iPad is exactly that: a sub-640px CSS
+   viewport that still has the "..." pill floating over it. There's no
+   reliable CSS signal for "this is an iPad pane, not a phone," so the
+   floor can't be conditional at all; the small extra gap on a plain phone
+   is the cost of never colliding on an iPad. */
+.header-safe-pt {
+  padding-top: max(env(safe-area-inset-top, 0px), 3rem);
 }
 
 @keyframes pulse-dot {

@@ -723,7 +723,7 @@ export function RecordingDetailView({
           onClick={onBack}
           aria-label="목록으로 돌아가기"
           title="목록으로 돌아가기"
-          className="-ml-1 mb-4 flex h-12 w-12 items-center justify-center rounded-full text-zinc-600 transition hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+          className="-ml-1 mb-4 mr-auto flex h-12 w-12 shrink-0 items-center justify-center rounded-full text-zinc-600 transition hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
         >
           <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2">
             <path d="M15 18l-6-6 6-6" strokeLinecap="round" strokeLinejoin="round" />
