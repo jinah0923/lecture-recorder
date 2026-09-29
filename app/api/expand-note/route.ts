@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { ApiError, GoogleGenAI, Type, createPartFromBase64, createUserContent } from "@google/genai";
 import type { Part } from "@google/genai";
+import { VERBATIM_TERMINOLOGY_RULE } from "@/lib/promptRules";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -202,7 +203,9 @@ export async function POST(request: Request) {
 
   const systemInstruction = [
     "당신은 단순 용어 사전이 아니라, 학습자의 요청에 맞춰 기존 강의노트를 보완·편집하는 '강의노트 보완/편집 엔진'입니다.",
-    "반드시 지정된 JSON 스키마 형식으로만, 한국어로 응답하세요.",
+    "반드시 지정된 JSON 스키마 형식으로만 응답하세요. 설명 문장은 한국어로 쓰되, 전문 용어는 아래 [원본 워딩 최우선 보존] " +
+      "규칙을 따르세요 — 녹음 스크립트와 [기존 강의노트]에 쓰인 용어 표기를 그대로 이어서 쓰세요.",
+    VERBATIM_TERMINOLOGY_RULE,
     "먼저 학습자 질문의 의도를 파악하세요 — 예: 누락된 내용 추가, 기존 설명의 오류/부족한 부분 보완·수정, 특정 " +
       "양식(표/목록/단계별 정리 등)으로 변환 요청, 심화 개념 확장 요청 등. 그 의도에 정확히 맞는 내용을 작성하세요. " +
       "무관한 내용을 지어내지 마세요.",

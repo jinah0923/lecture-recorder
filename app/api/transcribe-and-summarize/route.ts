@@ -2,6 +2,7 @@ import { NextResponse, after } from "next/server";
 import { del, get } from "@vercel/blob";
 import { ApiError, GoogleGenAI, Type, createPartFromBase64, createPartFromUri, createUserContent } from "@google/genai";
 import type { File as GenAiFile, Part } from "@google/genai";
+import { VERBATIM_TERMINOLOGY_RULE } from "@/lib/promptRules";
 import { getRedisClient, isRedisConfigured } from "@/lib/redis";
 
 // Node.js, not Edge — this route now talks to Redis via ioredis (see
@@ -523,7 +524,10 @@ type RawAnalysisResponse = { summary?: unknown; lectureNote?: unknown; checklist
 async function callSttWorker(ai: GoogleGenAI, uploadedAudio: GenAiFile): Promise<RawSttResponse> {
   const systemInstruction = [
     "당신은 강의 녹음 오디오를 한 글자도 빠짐없이 받아쓰는 음성 인식(STT) 전문 어시스턴트입니다.",
-    "반드시 지정된 JSON 스키마 형식으로만, 한국어로 응답하세요.",
+    "반드시 지정된 JSON 스키마 형식으로만 응답하세요. 들린 언어 그대로 받아쓰세요 — 한국어 발화는 한국어로, 교수가 영어로 " +
+      "발음한 단어·전문 용어(예: myoblast)는 번역하거나 한글로 음차하지 말고 영문 철자 그대로 적으세요. 들린 단어를 약어·기호·" +
+      "동의어로 바꾸지도 마세요 — 교수가 'deoxyribonucleic acid'라고 말했다면 'DNA'로 줄이지 말고, 'DNA'라고 말했다면 풀어 " +
+      "쓰지 마세요. 발음된 단어 그대로가 정답입니다.",
     "당신의 유일한 임무는 오디오에 실제로 발화된 내용을 정확하게 받아쓰는 것입니다 — 요약하거나 압축하거나 의역하지 마세요.",
     "script는 반드시 오디오 00:00부터 끝까지에 대한 100% 완전한 받아쓰기여야 합니다. 오디오가 길다는 이유로 " +
       "일부 구간을 생략, 압축, 요약하는 것은 절대 허용되지 않습니다.",
@@ -602,7 +606,9 @@ async function callAnalysisWorker(
     `당신은 요약자(Summarizer)가 아니라, ${sourceLabel}(및 첨부된 경우 강의 참고자료)에 담긴 모든 디테일을 하나도 빠뜨리지 않고 ` +
       "기록하는 구조화 전문가(Meticulous Documenter)입니다. 당신의 임무는 내용을 줄이는 것이 아니라, 원본의 정보를 100% 보존한 채 " +
       "읽기 쉬운 구조(제목·불릿·하위 항목·표)로 재배치하는 것입니다.",
-    "반드시 지정된 JSON 스키마 형식으로만, 한국어로 응답하세요.",
+    "반드시 지정된 JSON 스키마 형식으로만 응답하세요. 설명 문장은 한국어로 쓰되, 전문 용어는 아래 [원본 워딩 최우선 보존] " +
+      "규칙을 따르세요.",
+    VERBATIM_TERMINOLOGY_RULE,
     audioSource.kind === "file"
       ? "오디오를 문장 그대로 받아쓰는 것이 아니라 들린 모든 정보를 빠짐없이 구조화해 기록하세요 — 전체 스크립트(받아쓰기) 자체는 " +
         "별도의 전담 프로세스가 처리합니다."
@@ -706,7 +712,8 @@ async function callAnalysisWorker(
       "  내용\n" +
       "\n" +
       "  </details>",
-    "- [서식] 핵심 용어는 볼드체(**)로 강조하세요.",
+    "- [서식] 핵심 용어는 볼드체(**)로 강조하세요. 용어 자체는 [원본 워딩 최우선 보존] 규칙대로 교수가 말한 그 단어로 쓰세요 " +
+      "(마크다운 표의 항목명·키워드 칸도 마찬가지).",
   ];
 
   if (hasReference) {
