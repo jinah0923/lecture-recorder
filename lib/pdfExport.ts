@@ -1,5 +1,6 @@
 "use client";
 
+import { tokenizeInline } from "@/lib/inlineMarkdown";
 import type { ChecklistItem, TranscriptSegment } from "@/lib/types";
 
 // html2canvas cannot parse modern CSS color functions (e.g. Tailwind v4's
@@ -60,14 +61,17 @@ function detectCallout(text: string): CalloutStyle | undefined {
   return PDF_CALLOUT_STYLES.find((callout) => trimmed.startsWith(callout.emoji));
 }
 
+// Same yellow as the on-screen <mark> (lib/markdown.tsx), as a hex literal.
+const PDF_HIGHLIGHT_STYLE = "background:#fef08a;color:#111827;padding:0 2px;border-radius:2px;";
+
 function renderInlineHtml(text: string): string {
-  const parts = text.split(/(\*\*[^*]+\*\*)/g);
-  return parts
-    .map((part) =>
-      part.startsWith("**") && part.endsWith("**") && part.length > 4
-        ? `<strong>${escapeHtml(part.slice(2, -2))}</strong>`
-        : escapeHtml(part),
-    )
+  return tokenizeInline(text)
+    .map((group) => {
+      const inner = group.parts
+        .map((part) => (part.bold ? `<strong>${escapeHtml(part.text)}</strong>` : escapeHtml(part.text)))
+        .join("");
+      return group.highlight ? `<mark style="${PDF_HIGHLIGHT_STYLE}">${inner}</mark>` : inner;
+    })
     .join("");
 }
 

@@ -1,6 +1,7 @@
-import type { ReactNode } from "react";
+import { Fragment, type ReactNode } from "react";
 import { MarkdownImage } from "@/components/MarkdownImage";
 import { SlideImage } from "@/components/SlideImage";
+import { tokenizeInline } from "@/lib/inlineMarkdown";
 
 const CALLOUT_STYLES: Array<{ emoji: string; className: string }> = [
   // Deliberately bolder than every other callout below (thicker border,
@@ -44,17 +45,35 @@ function detectCallout(text: string) {
   return CALLOUT_STYLES.find((callout) => trimmed.startsWith(callout.emoji));
 }
 
+// <mark> is the note's "형광펜" — sentences the professor or the slides
+// emphasized (see the [강조 요소] rule in app/api/transcribe-and-summarize).
+// Text is forced dark on both themes since it sits on a yellow fill, and
+// box-decoration-clone keeps the padding/rounding on every line when a long
+// highlighted sentence wraps.
 function renderInline(text: string): ReactNode[] {
-  const parts = text.split(/(\*\*[^*]+\*\*)/g);
-  return parts.map((part, index) => {
-    if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
-      return (
-        <strong key={index} className="font-bold text-zinc-900 dark:text-zinc-100">
-          {part.slice(2, -2)}
+  return tokenizeInline(text).map((group, groupIndex) => {
+    const parts = group.parts.map((part, partIndex) =>
+      part.bold ? (
+        <strong
+          key={partIndex}
+          className={group.highlight ? "font-bold" : "font-bold text-zinc-900 dark:text-zinc-100"}
+        >
+          {part.text}
         </strong>
-      );
-    }
-    return <span key={index}>{part}</span>;
+      ) : (
+        <Fragment key={partIndex}>{part.text}</Fragment>
+      ),
+    );
+    return group.highlight ? (
+      <mark
+        key={groupIndex}
+        className="rounded-sm bg-yellow-200 px-0.5 text-zinc-900 box-decoration-clone dark:bg-yellow-300/85 dark:text-zinc-950"
+      >
+        {parts}
+      </mark>
+    ) : (
+      <Fragment key={groupIndex}>{parts}</Fragment>
+    );
   });
 }
 

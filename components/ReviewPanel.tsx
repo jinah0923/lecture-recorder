@@ -9,6 +9,7 @@ import { PdfExportModal } from "@/components/PdfExportModal";
 import { TranscriptPanel } from "@/components/TranscriptPanel";
 import { buildDeepDiveImageProxyUrl, uploadFileToBlob } from "@/lib/blobUpload";
 import { copyToClipboard, downloadTextFile } from "@/lib/export";
+import { stripMarkTags } from "@/lib/inlineMarkdown";
 import { renderMarkdown } from "@/lib/markdown";
 import { buildSlideThumbnails } from "@/lib/pdfSlides";
 import type { AiResult, ChecklistItem, DraftBlock, TranscriptSegment } from "@/lib/types";
@@ -92,7 +93,21 @@ function mergeConfirmedBlocks(lectureNote: string, blocks: DraftBlock[]): string
   for (const block of blocks) {
     if (block.status !== "confirmed") continue;
     const markdown = buildDraftBlockMarkdown(block);
-    const anchorIndex = block.anchorText ? result.indexOf(block.anchorText) : -1;
+    let anchorIndex = block.anchorText ? result.indexOf(block.anchorText) : -1;
+    // The model often quotes a highlighted sentence without its <mark> tags,
+    // which misses an exact match — fall back to the first line containing
+    // the anchor once tags are ignored on both sides.
+    if (anchorIndex === -1 && block.anchorText) {
+      const bareAnchor = stripMarkTags(block.anchorText);
+      let offset = 0;
+      for (const line of result.split("\n")) {
+        if (bareAnchor && stripMarkTags(line).includes(bareAnchor)) {
+          anchorIndex = offset;
+          break;
+        }
+        offset += line.length + 1;
+      }
+    }
     if (anchorIndex === -1) {
       result = `${result}\n\n${markdown}`;
       continue;
@@ -188,7 +203,10 @@ export function ReviewPanel({
 
   function handleDownloadSummary(extension: "txt" | "md") {
     const mime = extension === "md" ? "text/markdown" : "text/plain";
-    downloadTextFile(`lecture-summary.${extension}`, buildSummaryExportContent(aiResult), mime);
+    // .txt has no formatting at all, so the 형광펜 tags would just be noise;
+    // .md keeps them (markdown editors render <mark>).
+    const content = buildSummaryExportContent(aiResult);
+    downloadTextFile(`lecture-summary.${extension}`, extension === "txt" ? stripMarkTags(content) : content, mime);
   }
 
   async function handleCopyNote() {
@@ -199,7 +217,8 @@ export function ReviewPanel({
 
   function handleDownloadNote(extension: "txt" | "md") {
     const mime = extension === "md" ? "text/markdown" : "text/plain";
-    downloadTextFile(`lecture-note.${extension}`, buildLectureNoteExportContent(aiResult), mime);
+    const content = buildLectureNoteExportContent(aiResult);
+    downloadTextFile(`lecture-note.${extension}`, extension === "txt" ? stripMarkTags(content) : content, mime);
   }
 
   async function requestExpansion(question: string, replaceBlockId?: string, imageFile?: File) {

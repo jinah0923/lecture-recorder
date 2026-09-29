@@ -2,6 +2,7 @@ import { NextResponse, after } from "next/server";
 import { del, get } from "@vercel/blob";
 import { ApiError, GoogleGenAI, Type, createPartFromBase64, createPartFromUri, createUserContent } from "@google/genai";
 import type { File as GenAiFile, Part } from "@google/genai";
+import { stripMarkTags } from "@/lib/inlineMarkdown";
 import { VERBATIM_TERMINOLOGY_RULE } from "@/lib/promptRules";
 import { getRedisClient, isRedisConfigured } from "@/lib/redis";
 
@@ -219,7 +220,7 @@ const ANALYSIS_RESPONSE_SCHEMA = {
     lectureNote: {
       type: Type.STRING,
       description:
-        "강의 음성과 참고자료를 통합해 원본의 정보량을 100% 보존한 무손실 상세 강의노트 (마크다운, 요약 금지). 번호가 매겨진 대주제(## 1. ...) 구조, 본문은 일반 텍스트/불릿 기본, 강조가 필요한 항목에만 선택적으로 '> 🚨'/'> 🔥'/'> 🗣️' 콜아웃 사용",
+        "강의 음성과 참고자료를 통합해 원본의 정보량을 100% 보존한 무손실 상세 강의노트 (마크다운, 요약 금지). 번호가 매겨진 대주제(## 1. ...) 구조, 본문은 일반 텍스트/불릿 기본, 강조가 필요한 항목에만 선택적으로 '> 🚨'/'> 🔥'/'> 🗣️' 콜아웃 사용. 교수가 강조한 문장·자료에서 시각적으로 강조된 텍스트는 빠짐없이 포함하고 <mark>...</mark>로 형광펜 표시",
     },
     checklist: {
       type: Type.ARRAY,
@@ -698,6 +699,22 @@ async function callAnalysisWorker(
     "  > 🔥 [핵심 강조]: 교수가 강조했지만 출제 여부를 직접 언급하지는 않은 중요 개념 — 🚨 항목과 중복해서 표시하지 마세요",
     "  > 🗣️ [교수님 코멘트/사례]: 맥락 이해를 돕는 교수님의 예시나 인상적인 멘트",
     "  그 외 일반적인 설명은 콜아웃 없이 작성하세요.",
+    "- [강조 요소 절대 보존 + 형광펜(<mark>) 표시 — 최우선급 규칙] 아래 두 종류의 '강조된 내용'은 핵심 출제 포인트로 " +
+      "간주해 단 하나도 빠짐없이 lectureNote에 포함하세요([절대 무손실] 규칙과 동일한 수준). 그리고 그 문장(또는 구절) " +
+      "자체를 반드시 HTML `<mark>...</mark>` 태그로 감싸 형광펜 표시하세요 — 단순 텍스트로 적지 마세요.\n" +
+      "  (1) 시각적 강조(첨부된 경우): 강의자료(PDF)나 슬라이드 이미지에서 형광펜(하이라이트), 밑줄, 붉은색 등 색깔 글씨, " +
+      "굵은 글씨, 박스·별표 등으로 강조된 텍스트. 교수가 음성으로 언급하지 않았더라도 반드시 포함하세요.\n" +
+      "  (2) 청각적 강조: 교수가 \"중요하다\", \"밑줄 그어라\", \"별표 쳐라\", \"꼭 기억해라\", \"시험에 나온다\"처럼 " +
+      "명시적으로 강조한 문장.\n" +
+      "  형식: `<mark>강조된 내용</mark>`. 태그는 한 줄 안에서 열고 닫으세요(여러 줄이나 여러 불릿에 걸치지 말 것 — " +
+      "필요하면 불릿마다 따로 감싸세요). 볼드가 필요하면 태그 안쪽에 쓰세요: `<mark>**myoblast**는 fusion해서 " +
+      "myotube가 된다</mark>`. `<mark>` 외의 HTML 태그(`<u>`, `<span>`, `<font>`, `<b>` 등)는 쓰지 마세요. 본문·불릿·" +
+      "표 셀·콜아웃 안 등 어디에 쓰이든 같은 방식으로 적용합니다.\n" +
+      "  🚨 콜아웃과의 관계: 🚨 [시험 출제 100%] 콜아웃은 위 [시험 출제 신호 감지] 규칙 그대로, 시험 출제를 명시적으로 " +
+      "언급한 경우에만 씁니다 — 그리고 그 콜아웃 안의 핵심 문장도 `<mark>`로 감싸세요. 시험 언급 없이 \"중요하다\", " +
+      "\"밑줄 그어라\"라고만 한 문장이나 자료에서 시각적으로 강조된 문장은 🚨를 붙이지 말고 `<mark>`만 쓰세요.\n" +
+      "  남용 금지: 교수나 자료가 실제로 강조한 내용에만 쓰세요. 당신이 중요하다고 판단했을 뿐 실제로 강조되지 " +
+      "않은 문장에는 쓰지 마세요. summary와 checklist에는 `<mark>`를 쓰지 마세요.",
     "- [비교 표 필수] 성적 평가 비율, 과제 제출 일정, AI 활용 가이드라인처럼 서로 비교 가능한 항목이 3개 이상 " +
       "나열되는 경우, 절대 줄글 문단이나 글머리 기호 리스트로 나열하지 말고 반드시 Markdown 표(\"| 항목 | 내용 |\" " +
       "형식, 구분선 행 포함)로 작성하세요.",
@@ -873,7 +890,9 @@ function buildAnalysisResult(sttSegments: unknown, hasSpeechFlag: boolean, analy
     : [];
   const checklist: ChecklistItem[] = checklistTexts.map((text, index) => ({
     id: `check-${index}`,
-    text: fixEscapedNewlines(text),
+    // Checklist items render as plain text everywhere (ChecklistPanel, the
+    // weekly feed, Notion to-dos), so a stray 형광펜 tag would show raw.
+    text: stripMarkTags(fixEscapedNewlines(text)),
     done: false,
   }));
 

@@ -3,6 +3,7 @@ import { APIResponseError, Client, isNotionClientError } from "@notionhq/client"
 import type { BlockObjectRequest } from "@notionhq/client";
 import { extractNotionId } from "@/lib/notionUtils";
 import { formatDuration } from "@/lib/format";
+import { tokenizeInline } from "@/lib/inlineMarkdown";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -17,7 +18,7 @@ const MAX_TRANSCRIPT_PARAGRAPHS = 500;
 type NotionRichText = {
   type?: "text";
   text: { content: string };
-  annotations?: { bold?: boolean };
+  annotations?: { bold?: boolean; color?: NotionCalloutColor };
 };
 
 // A plain paragraph block has no children of its own, so it structurally
@@ -86,19 +87,26 @@ function chunkText(text: string, maxLen: number): string[] {
   return chunks;
 }
 
-function buildRichText(text: string, bold = false): NotionRichText[] {
+// <mark> (the note's 형광펜, see lib/inlineMarkdown.ts) maps to a Notion
+// text background color. Callers inside a callout that's already yellow pass
+// a different color so the highlight doesn't vanish into its background.
+function buildRichText(text: string, bold = false, highlightColor: NotionCalloutColor = "yellow_background"): NotionRichText[] {
   if (!text) return [];
-  const parts = text.split(/(\*\*[^*]+\*\*)/g).filter((part) => part.length > 0);
   const result: NotionRichText[] = [];
-  for (const part of parts) {
-    const isBold = bold || (part.startsWith("**") && part.endsWith("**") && part.length > 4);
-    const content = part.startsWith("**") && part.endsWith("**") && part.length > 4 ? part.slice(2, -2) : part;
-    for (const chunk of chunkText(content, RICH_TEXT_CHAR_LIMIT)) {
-      result.push({
-        type: "text",
-        text: { content: chunk },
-        ...(isBold ? { annotations: { bold: true } } : {}),
-      });
+  for (const group of tokenizeInline(text)) {
+    for (const part of group.parts) {
+      const isBold = bold || part.bold;
+      const annotations = {
+        ...(isBold ? { bold: true } : {}),
+        ...(group.highlight ? { color: highlightColor } : {}),
+      };
+      for (const chunk of chunkText(part.text, RICH_TEXT_CHAR_LIMIT)) {
+        result.push({
+          type: "text",
+          text: { content: chunk },
+          ...(Object.keys(annotations).length > 0 ? { annotations } : {}),
+        });
+      }
     }
   }
   return result;
@@ -293,7 +301,11 @@ function convertLectureNoteToBlocks(markdown: string, depth = 0): BlockObjectReq
         callout: {
           icon: { type: "emoji", emoji: calloutEmoji },
           color: CALLOUT_COLOR_BY_EMOJI[calloutEmoji],
-          rich_text: buildRichText(stripCalloutEmoji(line, calloutEmoji), BOLD_CALLOUT_EMOJIS.has(calloutEmoji)),
+          rich_text: buildRichText(
+            stripCalloutEmoji(line, calloutEmoji),
+            BOLD_CALLOUT_EMOJIS.has(calloutEmoji),
+            CALLOUT_COLOR_BY_EMOJI[calloutEmoji] === "yellow_background" ? "orange_background" : "yellow_background",
+          ),
         },
       });
       index++;
