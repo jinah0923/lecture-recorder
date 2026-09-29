@@ -25,7 +25,7 @@ import {
   softDeleteSession,
   toggleSessionChecklistItem,
 } from "@/lib/db";
-import { mergeAndSync, pushLocalSessions } from "@/lib/sync";
+import { deleteCloudSessions, mergeAndSync, onSyncFailure, pushLocalSessions, reportSyncFailure } from "@/lib/sync";
 import type { ChecklistFeedItem, LectureSession, LectureSessionSummary, SessionAudio } from "@/lib/types";
 
 function blobCleanupTexts(sessions: Array<LectureSession | null>): string[] {
@@ -54,6 +54,28 @@ export function LectureStudio() {
     null,
   );
   const [showExitToast, setShowExitToast] = useState(false);
+  // Background sync failures (lib/sync.ts broadcasts them — the pushes after
+  // each edit are otherwise fire-and-forget) shown with their actual cause.
+  // The same message isn't repeated within SYNC_TOAST_REPEAT_MS, so being
+  // offline doesn't raise a toast on every single edit.
+  const [syncErrorToast, setSyncErrorToast] = useState<string | null>(null);
+  const lastSyncToastRef = useRef<{ message: string; at: number } | null>(null);
+  useEffect(() => {
+    const SYNC_TOAST_REPEAT_MS = 60_000;
+    let hideTimer: number | undefined;
+    const unsubscribe = onSyncFailure((message) => {
+      const last = lastSyncToastRef.current;
+      if (last && last.message === message && Date.now() - last.at < SYNC_TOAST_REPEAT_MS) return;
+      lastSyncToastRef.current = { message, at: Date.now() };
+      setSyncErrorToast(message);
+      window.clearTimeout(hideTimer);
+      hideTimer = window.setTimeout(() => setSyncErrorToast(null), 8000);
+    });
+    return () => {
+      unsubscribe();
+      window.clearTimeout(hideTimer);
+    };
+  }, []);
   // Inline category-rename state — only ever relevant while screen.kind is
   // "category" (see the header below); kept here rather than in a separate
   // component since it needs direct access to categories/sessions/
@@ -176,6 +198,17 @@ export function LectureStudio() {
     await pushLocalSessions().catch(() => {});
   }, [authStatus]);
 
+  // Permanent deletion has to be sent explicitly — sync only ever upserts
+  // (see lib/sync.ts), so without this the cloud copy would stay and come
+  // back on the next merge.
+  const syncDeletion = useCallback(
+    async (ids: string[]) => {
+      if (authStatus !== "authenticated") return;
+      await deleteCloudSessions(ids).catch(reportSyncFailure);
+    },
+    [authStatus],
+  );
+
   const handleCategoryCreated = useCallback((name: string) => {
     setCategories((prev) => {
       if (prev.includes(name)) return prev;
@@ -288,7 +321,7 @@ export function LectureStudio() {
         refreshTrash();
         refreshChecklistFeed();
       })
-      .catch(() => {});
+      .catch(reportSyncFailure);
   }, [authStatus, refreshSessions, refreshTrash, refreshChecklistFeed]);
 
   const categorySummaries = useMemo(() => {
@@ -364,7 +397,7 @@ export function LectureStudio() {
     const removed = await permanentlyDeleteSession(id);
     if (removed) void purgeSessionBlobs(blobCleanupTexts([removed]));
     refreshTrash();
-    await syncNow();
+    await syncDeletion([id]);
   }
 
   // Optimistic — the reordered position shows immediately (dnd-kit already
@@ -391,7 +424,7 @@ export function LectureStudio() {
     const removed = await Promise.all(trashedSessions.map((session) => permanentlyDeleteSession(session.id)));
     void purgeSessionBlobs(blobCleanupTexts(removed));
     refreshTrash();
-    await syncNow();
+    await syncDeletion(trashedSessions.map((session) => session.id));
   }
 
   function handleSubmitCategory(name: string) {
@@ -576,6 +609,14 @@ export function LectureStudio() {
           onEmptyTrash={handleEmptyTrash}
           onClose={() => setShowTrash(false)}
         />
+      )}
+
+      {syncErrorToast && (
+        <div className="safe-pb fixed inset-x-0 bottom-20 z-50 flex justify-center px-4">
+          <p className="max-w-md break-words rounded-2xl bg-red-600 px-4 py-3 text-center text-sm text-white shadow-lg dark:bg-red-700">
+            ☁️ {syncErrorToast}
+          </p>
+        </div>
       )}
 
       {showExitToast && (
