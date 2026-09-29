@@ -1,6 +1,7 @@
 import { NextResponse, after } from "next/server";
 import { del, get } from "@vercel/blob";
 import { ApiError, GoogleGenAI, Type, createPartFromBase64, createPartFromUri, createUserContent } from "@google/genai";
+import { SAFETY_SETTINGS, describeGeminiError as describeSharedGeminiError, readResponseText } from "@/lib/gemini";
 import type { File as GenAiFile, Part } from "@google/genai";
 import { stripMarkTags } from "@/lib/inlineMarkdown";
 import { VERBATIM_TERMINOLOGY_RULE } from "@/lib/promptRules";
@@ -264,20 +265,7 @@ function fixEscapedNewlines(text: string): string {
 }
 
 function describeGeminiError(error: unknown): string {
-  if (error instanceof ApiError) {
-    if (error.status === 404) {
-      return `Gemini 모델(${MODEL})을 찾을 수 없습니다. 모델명이 올바른지, 이 API 키에서 사용 가능한 모델인지 확인해주세요. (${error.message})`;
-    }
-    if (error.status === 401 || error.status === 403) {
-      return `Gemini API 인증에 실패했습니다. GEMINI_API_KEY가 유효한지 확인해주세요. (${error.message})`;
-    }
-    if (error.status === 429) {
-      return "Google Gemini API 크레딧이 소진되었습니다. AI Studio에서 크레딧을 충전하거나 새 API 키를 등록해주세요.";
-    }
-    return `Gemini API 오류 (HTTP ${error.status}): ${error.message}`;
-  }
-  const message = error instanceof Error ? error.message : "AI 분석에 실패했습니다.";
-  return `Gemini 분석 실패: ${message}`;
+  return describeSharedGeminiError(error, MODEL);
 }
 
 function parseBlobRef(raw: unknown): BlobRef | null {
@@ -563,17 +551,13 @@ async function callSttWorker(ai: GoogleGenAI, uploadedAudio: GenAiFile): Promise
       responseMimeType: "application/json",
       responseSchema: STT_RESPONSE_SCHEMA,
       maxOutputTokens: 65536,
+      safetySettings: SAFETY_SETTINGS,
     },
   });
 
-  if (response.promptFeedback?.blockReason) {
-    throw new Error("안전 정책으로 인해 이 요청을 처리할 수 없습니다. 다른 파일로 시도해주세요.");
-  }
-  if (!response.text) {
-    throw new Error("AI로부터 스크립트 응답을 받지 못했습니다. 다시 시도해주세요.");
-  }
+  const text = readResponseText(response, "스크립트(STT)");
   try {
-    return JSON.parse(response.text);
+    return JSON.parse(text);
   } catch {
     throw new Error("스크립트 응답을 해석하는 데 실패했습니다. 다시 시도해주세요.");
   }
@@ -838,17 +822,13 @@ async function callAnalysisWorker(
       responseMimeType: "application/json",
       responseSchema: ANALYSIS_RESPONSE_SCHEMA,
       maxOutputTokens: 65536,
+      safetySettings: SAFETY_SETTINGS,
     },
   });
 
-  if (response.promptFeedback?.blockReason) {
-    throw new Error("안전 정책으로 인해 이 요청을 처리할 수 없습니다. 다른 파일로 시도해주세요.");
-  }
-  if (!response.text) {
-    throw new Error("AI로부터 분석 응답을 받지 못했습니다. 다시 시도해주세요.");
-  }
+  const text = readResponseText(response, "강의노트 분석");
   try {
-    return JSON.parse(response.text);
+    return JSON.parse(text);
   } catch {
     throw new Error("분석 응답을 해석하는 데 실패했습니다. 다시 시도해주세요.");
   }
@@ -1065,7 +1045,13 @@ async function runChunkedAnalysisJob(
         );
         const activeFile = await waitForFileActive(ai, chunkFile);
         uploadedChunkFiles.push(activeFile);
-        const result = await callSttWorker(ai, activeFile);
+        let result: RawSttResponse;
+        try {
+          result = await callSttWorker(ai, activeFile);
+        } catch (error) {
+          console.error("[transcribe-and-summarize] chunk STT failed", { index, error });
+          throw new Error(`오디오 조각 ${index + 1}/${chunks.length} 음성 인식 실패: ${describeGeminiError(error)}`);
+        }
         completedChunks += 1;
         await reportStage(jobId, `청크 ${completedChunks}/${chunks.length} 처리 중...`);
         return { chunk, result };

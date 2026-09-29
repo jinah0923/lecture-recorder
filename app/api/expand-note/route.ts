@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { ApiError, GoogleGenAI, Type, createPartFromBase64, createUserContent } from "@google/genai";
+import { SAFETY_SETTINGS, describeGeminiError as describeSharedGeminiError, readResponseText } from "@/lib/gemini";
 import type { Part } from "@google/genai";
 import { VERBATIM_TERMINOLOGY_RULE } from "@/lib/promptRules";
 
@@ -114,20 +115,7 @@ async function fetchImageAsPart(url: string): Promise<Part> {
 }
 
 function describeGeminiError(error: unknown): string {
-  if (error instanceof ApiError) {
-    if (error.status === 404) {
-      return `Gemini 모델(${MODEL})을 찾을 수 없습니다. 모델명이 올바른지, 이 API 키에서 사용 가능한 모델인지 확인해주세요. (${error.message})`;
-    }
-    if (error.status === 401 || error.status === 403) {
-      return `Gemini API 인증에 실패했습니다. GEMINI_API_KEY가 유효한지 확인해주세요. (${error.message})`;
-    }
-    if (error.status === 429) {
-      return "Google Gemini API 크레딧이 소진되었습니다. AI Studio에서 크레딧을 충전하거나 새 API 키를 등록해주세요.";
-    }
-    return `Gemini API 오류 (HTTP ${error.status}): ${error.message}`;
-  }
-  const message = error instanceof Error ? error.message : "AI 심화 탐구에 실패했습니다.";
-  return `Gemini 요청 실패: ${message}`;
+  return describeSharedGeminiError(error, MODEL);
 }
 
 export async function POST(request: Request) {
@@ -320,17 +308,11 @@ export async function POST(request: Request) {
         systemInstruction,
         responseMimeType: "application/json",
         responseSchema: RESPONSE_SCHEMA,
+        safetySettings: SAFETY_SETTINGS,
       },
     });
-
-    if (response.promptFeedback?.blockReason) {
-      return NextResponse.json(
-        { error: "안전 정책으로 인해 이 요청을 처리할 수 없습니다." },
-        { status: 502 },
-      );
-    }
-
-    responseText = response.text;
+    // Throws with the actual block/finish reason (caught just below).
+    responseText = readResponseText(response, "심화 탐구");
   } catch (error) {
     console.error("[expand-note] Gemini call failed", {
       model: MODEL,

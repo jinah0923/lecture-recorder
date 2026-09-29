@@ -455,15 +455,19 @@ export function RecordingDetailView({
         await pushLocalSessions().catch(() => {});
       } catch (error) {
         clearStoredJobId(sessionId);
-        setAnalyzeError(error instanceof Error ? error.message : "분석 중 알 수 없는 오류가 발생했습니다.");
+        const message = error instanceof Error ? error.message : "분석 중 알 수 없는 오류가 발생했습니다.";
+        setAnalyzeError(message);
         // Covers both ways this can fail: pollJobUntilDone's own MAX_POLL_MS
-        // timeout, and the server explicitly writing an "error" job record
-        // — either way, the loading UI needs to release immediately (the
-        // finally block below does that) and the user needs an unmissable
-        // signal, not just the quieter inline box near the analyze button.
-        setPollFailureToast(POLL_TIMEOUT_MESSAGE);
+        // timeout (message is POLL_TIMEOUT_MESSAGE) and the server writing an
+        // "error" job record — in which case the message is the server's
+        // actual reason (Gemini quota, block reason, ...; see lib/gemini.ts),
+        // shown as-is rather than collapsed into one generic message.
+        setPollFailureToast(message);
         if (pollFailureToastTimerRef.current) window.clearTimeout(pollFailureToastTimerRef.current);
-        pollFailureToastTimerRef.current = window.setTimeout(() => setPollFailureToast(null), 5000);
+        pollFailureToastTimerRef.current = window.setTimeout(
+          () => setPollFailureToast(null),
+          message === POLL_TIMEOUT_MESSAGE ? 5000 : 10000,
+        );
         // A checkpoint may have just been written server-side during THIS
         // very attempt's STT phase, moments before it failed at stage 2 —
         // recheck so the button immediately offers "이어서 분석 재개하기"
@@ -897,7 +901,7 @@ export function RecordingDetailView({
 
       {pollFailureToast && (
         <div className="safe-pb fixed inset-x-0 bottom-6 z-50 flex justify-center px-4">
-          <p className="max-w-sm rounded-full bg-red-600 px-4 py-3 text-center text-sm text-white shadow-lg dark:bg-red-700">
+          <p className="max-w-md break-words rounded-2xl bg-red-600 px-4 py-3 text-center text-sm text-white shadow-lg dark:bg-red-700">
             {pollFailureToast}
           </p>
         </div>
