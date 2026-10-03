@@ -6,6 +6,7 @@ import { BookmarkPanel } from "@/components/BookmarkPanel";
 import { CategoryBadgeSelect } from "@/components/CategoryBadgeSelect";
 import { CollapsibleCard } from "@/components/CollapsibleCard";
 import { KeywordTagInput } from "@/components/KeywordTagInput";
+import { PolicyBlockedModal } from "@/components/PolicyBlockedModal";
 import { ReattachAudioPrompt } from "@/components/ReattachAudioPrompt";
 import { ReferenceDocDropzone } from "@/components/ReferenceDocDropzone";
 import { ReviewPanel } from "@/components/ReviewPanel";
@@ -20,6 +21,7 @@ import {
 } from "@/lib/analysisJob";
 import { probeAudioDurationMs } from "@/lib/audio";
 import { shouldChunk, splitAudioInBrowser } from "@/lib/audioChunking";
+import { parseProhibitedContentError } from "@/lib/geminiMessages";
 import {
   cacheAudioBlob,
   deleteCachedAudioBlob,
@@ -103,6 +105,9 @@ export function RecordingDetailView({
   // the analyze button the way analyzeError does.
   const [pollFailureToast, setPollFailureToast] = useState<string | null>(null);
   const pollFailureToastTimerRef = useRef<number | null>(null);
+  // Set instead of the toast when Gemini refused the content outright
+  // (PROHIBITED_CONTENT) — detail is where it happened, e.g. which chunk.
+  const [policyBlock, setPolicyBlock] = useState<{ detail: string } | null>(null);
   // Whether a prior analysis attempt for this session already completed
   // STAGE 1 (STT) server-side and has it checkpointed (see route.ts's
   // SttCheckpoint) — drives the "이어서 분석 재개하기" button label and lets
@@ -462,12 +467,17 @@ export function RecordingDetailView({
         // "error" job record — in which case the message is the server's
         // actual reason (Gemini quota, block reason, ...; see lib/gemini.ts),
         // shown as-is rather than collapsed into one generic message.
-        setPollFailureToast(message);
-        if (pollFailureToastTimerRef.current) window.clearTimeout(pollFailureToastTimerRef.current);
-        pollFailureToastTimerRef.current = window.setTimeout(
-          () => setPollFailureToast(null),
-          message === POLL_TIMEOUT_MESSAGE ? 5000 : 10000,
-        );
+        const blocked = parseProhibitedContentError(message);
+        if (blocked) {
+          setPolicyBlock(blocked);
+        } else {
+          setPollFailureToast(message);
+          if (pollFailureToastTimerRef.current) window.clearTimeout(pollFailureToastTimerRef.current);
+          pollFailureToastTimerRef.current = window.setTimeout(
+            () => setPollFailureToast(null),
+            message === POLL_TIMEOUT_MESSAGE ? 5000 : 10000,
+          );
+        }
         // A checkpoint may have just been written server-side during THIS
         // very attempt's STT phase, moments before it failed at stage 2 —
         // recheck so the button immediately offers "이어서 분석 재개하기"
@@ -906,6 +916,8 @@ export function RecordingDetailView({
           </p>
         </div>
       )}
+
+      {policyBlock && <PolicyBlockedModal detail={policyBlock.detail} onClose={() => setPolicyBlock(null)} />}
     </div>
   );
 }

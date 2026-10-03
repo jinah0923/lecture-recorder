@@ -1,7 +1,13 @@
 import { NextResponse, after } from "next/server";
 import { del, get } from "@vercel/blob";
 import { ApiError, GoogleGenAI, Type, createPartFromBase64, createPartFromUri, createUserContent } from "@google/genai";
-import { SAFETY_SETTINGS, describeGeminiError as describeSharedGeminiError, readResponseText } from "@/lib/gemini";
+import {
+  ACADEMIC_CONTEXT_INSTRUCTION,
+  PolicyBlockedError,
+  SAFETY_SETTINGS,
+  describeGeminiError as describeSharedGeminiError,
+  readResponseText,
+} from "@/lib/gemini";
 import type { File as GenAiFile, Part } from "@google/genai";
 import { stripMarkTags } from "@/lib/inlineMarkdown";
 import { VERBATIM_TERMINOLOGY_RULE } from "@/lib/promptRules";
@@ -512,6 +518,7 @@ type RawAnalysisResponse = { summary?: unknown; lectureNote?: unknown; checklist
 // comment above).
 async function callSttWorker(ai: GoogleGenAI, uploadedAudio: GenAiFile): Promise<RawSttResponse> {
   const systemInstruction = [
+    ACADEMIC_CONTEXT_INSTRUCTION,
     "당신은 강의 녹음 오디오를 한 글자도 빠짐없이 받아쓰는 음성 인식(STT) 전문 어시스턴트입니다.",
     "반드시 지정된 JSON 스키마 형식으로만 응답하세요. 들린 언어 그대로 받아쓰세요 — 한국어 발화는 한국어로, 교수가 영어로 " +
       "발음한 단어·전문 용어(예: myoblast)는 번역하거나 한글로 음차하지 말고 영문 철자 그대로 적으세요. 들린 단어를 약어·기호·" +
@@ -588,6 +595,7 @@ async function callAnalysisWorker(
   const sourceLabel = audioSource.kind === "file" ? "강의 녹음 오디오" : "강의 스크립트 전문(이미 완성된 정확한 받아쓰기)";
 
   const systemInstruction = [
+    ACADEMIC_CONTEXT_INSTRUCTION,
     `당신은 요약자(Summarizer)가 아니라, ${sourceLabel}(및 첨부된 경우 강의 참고자료)에 담긴 모든 디테일을 하나도 빠뜨리지 않고 ` +
       "기록하는 구조화 전문가(Meticulous Documenter)입니다. 당신의 임무는 내용을 줄이는 것이 아니라, 원본의 정보를 100% 보존한 채 " +
       "읽기 쉬운 구조(제목·불릿·하위 항목·표)로 재배치하는 것입니다.",
@@ -999,6 +1007,15 @@ async function runDirectAnalysisJob(
   return buildAnalysisResult(sttResult.script, sttResult.hasSpeech === true, analysisResult);
 }
 
+function formatChunkTime(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const mmss = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  return hours > 0 ? `${hours}:${mmss}` : mmss;
+}
+
 // The chunked path for long recordings — the browser already split the audio
 // into ~20-minute pieces and uploaded each as its own blob (see
 // lib/audioChunking.ts), so this Function never handles the whole
@@ -1050,6 +1067,13 @@ async function runChunkedAnalysisJob(
           result = await callSttWorker(ai, activeFile);
         } catch (error) {
           console.error("[transcribe-and-summarize] chunk STT failed", { index, error });
+          // Name the blocked stretch of the recording so the user knows
+          // which part to cut out before retrying.
+          if (error instanceof PolicyBlockedError) {
+            const nextStartMs = chunks[index + 1]?.startMs;
+            const range = `${formatChunkTime(chunk.startMs)}~${nextStartMs !== undefined ? formatChunkTime(nextStartMs) : "끝"}`;
+            throw new PolicyBlockedError(`오디오 조각 ${index + 1}/${chunks.length}, 녹음 ${range} 구간`);
+          }
           throw new Error(`오디오 조각 ${index + 1}/${chunks.length} 음성 인식 실패: ${describeGeminiError(error)}`);
         }
         completedChunks += 1;

@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
 import { ApiError, GoogleGenAI, Type, createPartFromBase64, createUserContent } from "@google/genai";
-import { SAFETY_SETTINGS, describeGeminiError as describeSharedGeminiError, readResponseText } from "@/lib/gemini";
+import {
+  ACADEMIC_CONTEXT_INSTRUCTION,
+  SAFETY_SETTINGS,
+  describeGeminiError as describeSharedGeminiError,
+  readResponseText,
+} from "@/lib/gemini";
 import type { Part } from "@google/genai";
 import { VERBATIM_TERMINOLOGY_RULE } from "@/lib/promptRules";
 
@@ -190,6 +195,7 @@ export async function POST(request: Request) {
   const ai = new GoogleGenAI({ apiKey });
 
   const systemInstruction = [
+    ACADEMIC_CONTEXT_INSTRUCTION,
     "당신은 단순 용어 사전이 아니라, 학습자의 요청에 맞춰 기존 강의노트를 보완·편집하는 '강의노트 보완/편집 엔진'입니다.",
     "반드시 지정된 JSON 스키마 형식으로만 응답하세요. 설명 문장은 한국어로 쓰되, 전문 용어는 아래 [원본 워딩 최우선 보존] " +
       "규칙을 따르세요 — 녹음 스크립트와 [기존 강의노트]에 쓰인 용어 표기를 그대로 이어서 쓰세요.",
