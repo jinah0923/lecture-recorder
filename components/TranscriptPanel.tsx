@@ -259,7 +259,11 @@ export function TranscriptPanel({
               else segmentRefs.current.delete(segment.id);
             }}
             className={`mb-1 flex items-start gap-2 rounded-lg px-1 py-1 ${
-              segment.id === firstMatchId ? "bg-yellow-50 dark:bg-yellow-500/10" : ""
+              segment.id === firstMatchId
+                ? "bg-yellow-50 dark:bg-yellow-500/10"
+                : segment.source === "blocked"
+                  ? "bg-amber-50 dark:bg-amber-950/40"
+                  : ""
             }`}
           >
             <button

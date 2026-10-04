@@ -40,6 +40,21 @@ export type TranscriptSegment = {
   startMs: number;
   endMs: number;
   text: string;
+  // "blocked" marks a placeholder for a stretch of a split recording that
+  // Gemini refused to transcribe (PROHIBITED_CONTENT) — see
+  // app/api/transcribe-and-summarize's chunked path.
+  source?: "blocked";
+};
+
+// A stretch of a split recording that Gemini refused (PROHIBITED_CONTENT)
+// and the analysis skipped instead of aborting. Shown above the lecture note
+// and when the job finishes (lib/geminiMessages.ts describeBlockedChunks).
+export type BlockedChunkNotice = {
+  // 1-based position among the recording's chunks.
+  chunkIndex: number;
+  chunkCount: number;
+  startMs: number;
+  endMs: number | null;
 };
 
 export type ChecklistItem = {
@@ -54,6 +69,7 @@ export type AiResult = {
   summary: string;
   lectureNote: string;
   checklist: ChecklistItem[];
+  blockedChunks?: BlockedChunkNotice[];
 };
 
 // Persisted shape — pure text/number metadata only. The audio itself lives on

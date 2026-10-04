@@ -9,6 +9,7 @@ import { PdfExportModal } from "@/components/PdfExportModal";
 import { TranscriptPanel } from "@/components/TranscriptPanel";
 import { buildDeepDiveImageProxyUrl, uploadFileToBlob } from "@/lib/blobUpload";
 import { copyToClipboard, downloadTextFile } from "@/lib/export";
+import { describeBlockedChunks } from "@/lib/geminiMessages";
 import { stripMarkTags } from "@/lib/inlineMarkdown";
 import { renderMarkdown } from "@/lib/markdown";
 import { buildSlideThumbnails } from "@/lib/pdfSlides";
@@ -459,7 +460,14 @@ export function ReviewPanel({
             </div>
           </div>
         ) : (
-          <LectureNote markdown={aiResult.lectureNote} slideImages={slideImages} />
+          <>
+            {aiResult.blockedChunks && aiResult.blockedChunks.length > 0 && (
+              <p className="mb-3 break-words rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
+                ⚠️ {describeBlockedChunks(aiResult.blockedChunks)} 이 노트는 그 구간을 제외한 나머지 녹음으로 작성되었습니다.
+              </p>
+            )}
+            <LectureNote markdown={aiResult.lectureNote} slideImages={slideImages} />
+          </>
         )}
 
         <div className="mt-3 border-t border-zinc-100 pt-3 dark:border-zinc-800">

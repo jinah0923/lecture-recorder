@@ -19,3 +19,35 @@ export function parseProhibitedContentError(message: string): { detail: string }
   if (index === -1) return null;
   return { detail: message.slice(index + PROHIBITED_CONTENT_MESSAGE.length).trim() };
 }
+
+// Every placeholder line (blockedChunkTranscriptText) contains this phrase —
+// the analysis prompt checks for it to tell the model about the gap.
+export const BLOCKED_CHUNK_MARKER = "구글 보안 정책(민감성 어휘 감지)으로 차단되어 받아쓰지 못했습니다";
+
+type ChunkRange = { chunkIndex: number; chunkCount: number; startMs: number; endMs: number | null };
+
+function describeChunkRange(chunk: ChunkRange): string {
+  return `${chunk.chunkIndex}/${chunk.chunkCount} 조각, ${formatClockTime(chunk.startMs)}~${
+    chunk.endMs !== null ? formatClockTime(chunk.endMs) : "끝"
+  }`;
+}
+
+// Written into the transcript in place of a stretch Gemini refused, so the
+// analysis model (and the reader) sees a marked gap rather than nothing.
+export function blockedChunkTranscriptText(chunk: ChunkRange): string {
+  return `⚠️ 이 구간(${describeChunkRange(chunk)})은 ${BLOCKED_CHUNK_MARKER}.`;
+}
+
+export function formatClockTime(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const mmss = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  return hours > 0 ? `${hours}:${mmss}` : mmss;
+}
+
+// "일부 구간(2/5 조각, 20:00~40:00)이 구글 보안 정책(민감성 어휘 감지)으로 차단되었습니다."
+export function describeBlockedChunks(chunks: ChunkRange[]): string {
+  return `일부 구간(${chunks.map(describeChunkRange).join(" · ")})이 구글 보안 정책(민감성 어휘 감지)으로 차단되었습니다.`;
+}

@@ -21,7 +21,7 @@ import {
 } from "@/lib/analysisJob";
 import { probeAudioDurationMs } from "@/lib/audio";
 import { shouldChunk, splitAudioInBrowser } from "@/lib/audioChunking";
-import { parseProhibitedContentError } from "@/lib/geminiMessages";
+import { describeBlockedChunks, parseProhibitedContentError } from "@/lib/geminiMessages";
 import {
   cacheAudioBlob,
   deleteCachedAudioBlob,
@@ -436,8 +436,17 @@ export function RecordingDetailView({
           summary: result.summary ?? "",
           lectureNote: result.lectureNote ?? "",
           checklist: result.checklist ?? [],
+          ...(result.blockedChunks?.length ? { blockedChunks: result.blockedChunks } : {}),
         };
         setAiResult(nextAiResult);
+        // The job succeeded but skipped what Gemini refused — say so right
+        // away, not only in the banner above the note.
+        if (result.blockedChunks?.length) {
+          const message = describeBlockedChunks(result.blockedChunks);
+          setPollFailureToast(message);
+          if (pollFailureToastTimerRef.current) window.clearTimeout(pollFailureToastTimerRef.current);
+          pollFailureToastTimerRef.current = window.setTimeout(() => setPollFailureToast(null), 10000);
+        }
 
         // Saved immediately here rather than left to the debounced autosave
         // effect above — that effect only fires ~300ms after this render

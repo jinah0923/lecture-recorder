@@ -8,6 +8,8 @@ import {
   describeGeminiError as describeSharedGeminiError,
   readResponseText,
 } from "@/lib/gemini";
+import { BLOCKED_CHUNK_MARKER, blockedChunkTranscriptText } from "@/lib/geminiMessages";
+import type { BlockedChunkNotice } from "@/lib/types";
 import type { File as GenAiFile, Part } from "@google/genai";
 import { stripMarkTags } from "@/lib/inlineMarkdown";
 import { VERBATIM_TERMINOLOGY_RULE } from "@/lib/promptRules";
@@ -71,6 +73,7 @@ type TranscriptSegment = {
   startMs: number;
   endMs: number;
   text: string;
+  source?: "blocked";
 };
 
 type ChecklistItem = {
@@ -121,6 +124,7 @@ type AnalysisResult = {
   summary: string;
   lectureNote: string;
   checklist: ChecklistItem[];
+  blockedChunks?: BlockedChunkNotice[];
 };
 
 // The shape stored in Redis under `job:{jobId}` — see writeJobRecord/
@@ -136,7 +140,9 @@ type JobRecord =
 // A single normalized STT segment, used both to build the checkpoint's
 // transcript text and to feed buildAnalysisResult on a resumed retry — see
 // SttCheckpoint below.
-type CheckpointSegment = { startSeconds: number; endSeconds: number; text: string };
+// source "blocked" = placeholder for a chunk Gemini refused (see
+// runChunkedAnalysisJob).
+type CheckpointSegment = { startSeconds: number; endSeconds: number; text: string; source?: "blocked" };
 
 // STAGE 1 (STT) checkpoint — written the moment transcription finishes
 // (see runDirectAnalysisJob/runChunkedAnalysisJob), independent of whether
@@ -151,6 +157,8 @@ type SttCheckpoint = {
   transcriptText: string;
   segments: CheckpointSegment[];
   hasSpeech: true;
+  // Carried so a resumed retry still reports which stretches were skipped.
+  blockedChunks?: BlockedChunkNotice[];
 };
 
 const MODEL = "gemini-3.6-flash";
@@ -785,6 +793,13 @@ async function callAnalysisWorker(
     // Plain text, not a file Part — cheaper on input tokens than the raw
     // audio would have been anyway, and this worker only needs to read it,
     // not listen to it.
+    if (audioSource.text.includes(BLOCKED_CHUNK_MARKER)) {
+      promptLines.push(
+        "",
+        `[차단 구간] 스크립트에 '${BLOCKED_CHUNK_MARKER}'라고 표시된 줄은 녹음 일부가 받아쓰기되지 못한 빈 구간입니다. ` +
+          "그 구간의 내용을 추측하거나 지어내지 말고, 나머지 스크립트만으로 작성하세요.",
+      );
+    }
     promptLines.push("", "[강의 스크립트 전문]", audioSource.text);
   }
 
@@ -845,7 +860,12 @@ async function callAnalysisWorker(
 // Shared by both the direct and chunked paths — turns the two workers' raw
 // JSON into the final typed result, applying the same no-speech short
 // circuit and field normalization either way.
-function buildAnalysisResult(sttSegments: unknown, hasSpeechFlag: boolean, analysisResult: RawAnalysisResponse): AnalysisResult {
+function buildAnalysisResult(
+  sttSegments: unknown,
+  hasSpeechFlag: boolean,
+  analysisResult: RawAnalysisResponse,
+  blockedChunks: BlockedChunkNotice[] = [],
+): AnalysisResult {
   const rawSegments = Array.isArray(sttSegments) ? sttSegments : [];
   const hasSpeech = hasSpeechFlag && rawSegments.length > 0;
 
@@ -860,12 +880,13 @@ function buildAnalysisResult(sttSegments: unknown, hasSpeechFlag: boolean, analy
   }
 
   const transcript: TranscriptSegment[] = rawSegments.map((segment, index) => {
-    const s = segment as { startSeconds?: unknown; endSeconds?: unknown; text?: unknown };
+    const s = segment as { startSeconds?: unknown; endSeconds?: unknown; text?: unknown; source?: unknown };
     return {
       id: `seg-${index}`,
       startMs: Math.round(Number(s.startSeconds ?? 0) * 1000),
       endMs: Math.round(Number(s.endSeconds ?? 0) * 1000),
       text: typeof s.text === "string" ? fixEscapedNewlines(s.text.trim()) : "",
+      ...(s.source === "blocked" ? { source: "blocked" as const } : {}),
     };
   });
 
@@ -884,7 +905,14 @@ function buildAnalysisResult(sttSegments: unknown, hasSpeechFlag: boolean, analy
     done: false,
   }));
 
-  return { transcript, fullText, summary, lectureNote, checklist };
+  return {
+    transcript,
+    fullText,
+    summary,
+    lectureNote,
+    checklist,
+    ...(blockedChunks.length > 0 ? { blockedChunks } : {}),
+  };
 }
 
 // Shared by both paths — reference docs are always uploaded whole
@@ -1007,15 +1035,6 @@ async function runDirectAnalysisJob(
   return buildAnalysisResult(sttResult.script, sttResult.hasSpeech === true, analysisResult);
 }
 
-function formatChunkTime(ms: number): string {
-  const totalSeconds = Math.floor(ms / 1000);
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  const mmss = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-  return hours > 0 ? `${hours}:${mmss}` : mmss;
-}
-
 // The chunked path for long recordings — the browser already split the audio
 // into ~20-minute pieces and uploaded each as its own blob (see
 // lib/audioChunking.ts), so this Function never handles the whole
@@ -1062,34 +1081,63 @@ async function runChunkedAnalysisJob(
         );
         const activeFile = await waitForFileActive(ai, chunkFile);
         uploadedChunkFiles.push(activeFile);
-        let result: RawSttResponse;
+        // null = Gemini refused this chunk (PROHIBITED_CONTENT). One refused
+        // stretch shouldn't cost the whole lecture, so it becomes a marked
+        // gap in the transcript and the rest is analyzed as usual.
+        let result: RawSttResponse | null;
         try {
           result = await callSttWorker(ai, activeFile);
         } catch (error) {
           console.error("[transcribe-and-summarize] chunk STT failed", { index, error });
-          // Name the blocked stretch of the recording so the user knows
-          // which part to cut out before retrying.
-          if (error instanceof PolicyBlockedError) {
-            const nextStartMs = chunks[index + 1]?.startMs;
-            const range = `${formatChunkTime(chunk.startMs)}~${nextStartMs !== undefined ? formatChunkTime(nextStartMs) : "끝"}`;
-            throw new PolicyBlockedError(`오디오 조각 ${index + 1}/${chunks.length}, 녹음 ${range} 구간`);
+          if (!(error instanceof PolicyBlockedError)) {
+            throw new Error(`오디오 조각 ${index + 1}/${chunks.length} 음성 인식 실패: ${describeGeminiError(error)}`);
           }
-          throw new Error(`오디오 조각 ${index + 1}/${chunks.length} 음성 인식 실패: ${describeGeminiError(error)}`);
+          result = null;
         }
         completedChunks += 1;
         await reportStage(jobId, `청크 ${completedChunks}/${chunks.length} 처리 중...`);
-        return { chunk, result };
+        return { chunk, index, result };
       }),
     );
 
-    const hasSpeech = chunkResults.some(({ result }) => result.hasSpeech === true);
+    const blockedChunks: BlockedChunkNotice[] = chunkResults
+      .filter(({ result }) => result === null)
+      .map(({ chunk, index }) => ({
+        chunkIndex: index + 1,
+        chunkCount: chunks.length,
+        startMs: chunk.startMs,
+        endMs: chunks[index + 1]?.startMs ?? null,
+      }));
+    const hasSpeech = chunkResults.some(({ result }) => result?.hasSpeech === true);
+    if (!hasSpeech && blockedChunks.length > 0) {
+      // Nothing left to analyze — every chunk with speech was refused.
+      throw new PolicyBlockedError(
+        `오디오 조각 ${blockedChunks.map((c) => `${c.chunkIndex}/${c.chunkCount}`).join(", ")} — 나머지 조각에는 음성이 없음`,
+      );
+    }
     const mergedSegments: CheckpointSegment[] = [];
     let segmentIndex = 0;
     // chunkResults preserves chunks' original chronological order (Promise.all
     // resolves in input order regardless of which chunk actually finished
     // first), so this merge doesn't need to re-sort anything.
-    for (const { chunk, result } of chunkResults) {
+    for (const { chunk, index, result } of chunkResults) {
       const offsetSeconds = chunk.startMs / 1000;
+      if (result === null) {
+        const nextStartMs = chunks[index + 1]?.startMs;
+        mergedSegments.push({
+          startSeconds: offsetSeconds,
+          endSeconds: nextStartMs !== undefined ? nextStartMs / 1000 : offsetSeconds,
+          text: blockedChunkTranscriptText({
+            chunkIndex: index + 1,
+            chunkCount: chunks.length,
+            startMs: chunk.startMs,
+            endMs: nextStartMs ?? null,
+          }),
+          source: "blocked",
+        });
+        segmentIndex++;
+        continue;
+      }
       for (const segment of normalizeSttSegments(result.script)) {
         mergedSegments.push({
           startSeconds: segment.startSeconds + offsetSeconds,
@@ -1103,6 +1151,7 @@ async function runChunkedAnalysisJob(
       chunkCount: chunks.length,
       mergedSegmentCount: segmentIndex,
       hasSpeech,
+      blockedChunkCount: blockedChunks.length,
     });
 
     if (!hasSpeech) {
@@ -1119,6 +1168,7 @@ async function runChunkedAnalysisJob(
       transcriptText,
       segments: mergedSegments,
       hasSpeech: true,
+      ...(blockedChunks.length > 0 ? { blockedChunks } : {}),
     });
 
     await reportStage(jobId, "AI 요약 생성 중...");
@@ -1146,7 +1196,7 @@ async function runChunkedAnalysisJob(
       throw new Error(describeGeminiError(error));
     }
 
-    return buildAnalysisResult(mergedSegments, hasSpeech, analysisResult);
+    return buildAnalysisResult(mergedSegments, hasSpeech, analysisResult, blockedChunks);
   } finally {
     await Promise.all(uploadedChunkFiles.map((file) => deleteUploadedFile(ai, file)));
     await Promise.all(uploadedReferences.map((file) => deleteUploadedFile(ai, file)));
@@ -1192,7 +1242,7 @@ async function runAnalysisOnlyFromCheckpoint(
       keywords,
       bookmarkLines,
     );
-    return buildAnalysisResult(checkpoint.segments, checkpoint.hasSpeech, analysisResult);
+    return buildAnalysisResult(checkpoint.segments, checkpoint.hasSpeech, analysisResult, checkpoint.blockedChunks);
   } catch (error) {
     console.error("[transcribe-and-summarize] checkpoint-resumed analysis worker failed", {
       model: MODEL,

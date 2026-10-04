@@ -1,6 +1,6 @@
 "use client";
 
-import type { ChecklistItem, TranscriptSegment } from "@/lib/types";
+import type { BlockedChunkNotice, ChecklistItem, TranscriptSegment } from "@/lib/types";
 
 export type AnalysisJobResult = {
   transcript: TranscriptSegment[];
@@ -8,6 +8,7 @@ export type AnalysisJobResult = {
   summary: string;
   lectureNote: string;
   checklist: ChecklistItem[];
+  blockedChunks?: BlockedChunkNotice[];
 };
 
 export type BlobRefPayload = {
