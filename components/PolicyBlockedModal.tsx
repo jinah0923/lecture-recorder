@@ -1,11 +1,21 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { PROHIBITED_CONTENT_MESSAGE } from "@/lib/geminiMessages";
 
 // Shown instead of the generic failure toast when Gemini rejects a request as
 // PROHIBITED_CONTENT (see lib/geminiMessages.ts). A modal rather than a toast:
 // retrying unchanged will fail the same way, so the user has to read it.
-export function PolicyBlockedModal({ detail, onClose }: { detail: string; onClose: () => void }) {
+// children: optional follow-up action (RecordingDetailView's OpenAI retry button).
+export function PolicyBlockedModal({
+  detail,
+  onClose,
+  children,
+}: {
+  detail: string;
+  onClose: () => void;
+  children?: ReactNode;
+}) {
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
@@ -31,6 +41,7 @@ export function PolicyBlockedModal({ detail, onClose }: { detail: string; onClos
             {detail}
           </p>
         )}
+        {children}
         <div className="mt-4 flex justify-end">
           <button
             type="button"

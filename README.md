@@ -39,7 +39,7 @@ Next.js 라우트는 `/` 하나뿐이며, 아래 3단계는 모두 클라이언�
 GEMINI_API_KEY=your-api-key-here
 ```
 
-   분석 화면에서 **OpenAI** 엔진(Whisper-1 음성 인식 + GPT 강의노트)을 고를 수 있게 하려면 OpenAI 키도 추가합니다. 없으면 OpenAI 선택지만 비활성화됩니다.
+   분석은 항상 Gemini로 실행됩니다. Gemini 분석이 실패했을 때 **OpenAI로 다시 분석**(Whisper-1 음성 인식 + GPT 강의노트) 버튼을 쓰려면 OpenAI 키도 추가합니다. 키가 없으면 그 버튼만 나타나지 않습니다.
 
 ```bash
 OPENAI_API_KEY=your-openai-api-key

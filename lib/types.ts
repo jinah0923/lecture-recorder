@@ -70,14 +70,22 @@ export type AiResult = {
   lectureNote: string;
   checklist: ChecklistItem[];
   blockedChunks?: BlockedChunkNotice[];
-  // Absent = Gemini (every result before the engine choice existed).
+  // Absent = Gemini.
   engine?: AnalysisEngine;
+  // Set when the user, after a failed Gemini analysis, explicitly approved
+  // re-running it on OpenAI (RecordingDetailView's retry button):
+  // "policy" = Gemini refused it (PROHIBITED_CONTENT), "error" = it failed
+  // for another reason.
+  userApprovedFallback?: UserApprovedFallbackReason;
 };
 
-// Which pipeline analyzes a recording — chosen by the user before starting
-// (RecordingDetailView). "gemini" = app/api/transcribe-and-summarize,
-// "openai" = app/api/transcribe-openai (Whisper + GPT, never touches Gemini).
+// Which pipeline analyzes a recording. "gemini" = app/api/transcribe-and-summarize
+// (always used by the main analyze button), "openai" =
+// app/api/transcribe-openai (Whisper + GPT, never touches Gemini) — only
+// ever started by the user from the retry button shown after a Gemini failure.
 export type AnalysisEngine = "gemini" | "openai";
+
+export type UserApprovedFallbackReason = "policy" | "error";
 
 // Persisted shape — pure text/number metadata only. The audio itself lives on
 // the user's device (downloaded on recording, or already local for uploads);

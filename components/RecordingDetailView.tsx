@@ -49,32 +49,8 @@ import type {
   SessionAudio,
   SlideImage,
   TranscriptSegment,
+  UserApprovedFallbackReason,
 } from "@/lib/types";
-
-// Per-viewer convenience only — which engine the picker starts on.
-const ENGINE_STORAGE_KEY = "lecture-recorder:analysisEngine";
-
-function readPreferredEngine(): AnalysisEngine | null {
-  try {
-    const saved = window.localStorage.getItem(ENGINE_STORAGE_KEY);
-    return saved === "openai" || saved === "gemini" ? saved : null;
-  } catch {
-    return null;
-  }
-}
-
-function savePreferredEngine(engine: AnalysisEngine): void {
-  try {
-    window.localStorage.setItem(ENGINE_STORAGE_KEY, engine);
-  } catch {
-    // Private mode / blocked storage — the choice just isn't remembered.
-  }
-}
-
-const ENGINE_OPTIONS: { value: AnalysisEngine; label: string }[] = [
-  { value: "gemini", label: "Google Gemini" },
-  { value: "openai", label: "OpenAI" },
-];
 
 const PROGRESS_STAGES = ["서버 분석 요청 중...", "음성 인식(STT) 진행 중...", "AI 요약 생성 중..."];
 // Matches TranscriptPanel's own debounce so a script edit lands in IndexedDB
@@ -144,12 +120,19 @@ export function RecordingDetailView({
   // written during that very attempt's STT phase before it failed at
   // stage 2).
   const [hasSttCheckpoint, setHasSttCheckpoint] = useState(false);
-  // Which pipeline handleAnalyze uses — picked by the user (never switched
-  // automatically). openAiConfigured: null until the server says whether
-  // it has OPENAI_API_KEY.
-  const [engine, setEngine] = useState<AnalysisEngine>("gemini");
+  // Analysis always runs on Gemini. Only after a Gemini run fails does the
+  // card offer an explicit "re-analyze with OpenAI" button — the switch
+  // happens solely when the user clicks it, never automatically.
+  // fallbackOffer: why the last Gemini run failed ("policy" =
+  // PROHIBITED_CONTENT), or null when no retry should be offered.
+  const [fallbackOffer, setFallbackOffer] = useState<UserApprovedFallbackReason | null>(null);
+  // null until the server says whether it has OPENAI_API_KEY — no key, no button.
   const [openAiConfigured, setOpenAiConfigured] = useState<boolean | null>(null);
-  const effectiveEngine: AnalysisEngine = engine === "openai" && openAiConfigured !== false ? "openai" : "gemini";
+  // Engine of the job being polled, and the reason an OpenAI retry was
+  // approved with — so an OpenAI retry that itself fails keeps offering the
+  // same button instead of reverting to Gemini.
+  const runningEngineRef = useRef<AnalysisEngine>("gemini");
+  const approvedReasonRef = useRef<UserApprovedFallbackReason>("error");
 
   const [keywords, setKeywords] = useState<string[]>([]);
   const [referenceFileNames, setReferenceFileNames] = useState<string[]>([]);
@@ -263,13 +246,11 @@ export function RecordingDetailView({
   // re-invoke it after an attempt fails (a checkpoint may have just been
   // written during that very attempt, before it failed at stage 2).
   const refreshCheckpointStatus = useCallback(async () => {
-    const has = await checkSttCheckpoint(sessionId, effectiveEngine);
+    const has = await checkSttCheckpoint(sessionId, "gemini");
     setHasSttCheckpoint(has);
-  }, [sessionId, effectiveEngine]);
+  }, [sessionId]);
 
   useEffect(() => {
-    const saved = readPreferredEngine();
-    if (saved) setEngine(saved);
     let cancelled = false;
     void fetchOpenAiEngineStatus().then(({ configured }) => {
       if (!cancelled) setOpenAiConfigured(configured);
@@ -278,11 +259,6 @@ export function RecordingDetailView({
       cancelled = true;
     };
   }, []);
-
-  function handleEngineChange(next: AnalysisEngine) {
-    setEngine(next);
-    savePreferredEngine(next);
-  }
 
   useEffect(() => {
     if (!hydrated || notFound || aiResult) return;
@@ -489,6 +465,7 @@ export function RecordingDetailView({
           checklist: result.checklist ?? [],
           ...(result.blockedChunks?.length ? { blockedChunks: result.blockedChunks } : {}),
           ...(result.engine === "openai" ? { engine: "openai" as const } : {}),
+          ...(result.userApprovedFallback ? { userApprovedFallback: result.userApprovedFallback } : {}),
         };
         setAiResult(nextAiResult);
         // The job succeeded but skipped what Gemini refused — say so right
@@ -529,6 +506,7 @@ export function RecordingDetailView({
         // actual reason (Gemini quota, block reason, ...; see lib/gemini.ts),
         // shown as-is rather than collapsed into one generic message.
         const blocked = parseProhibitedContentError(message);
+        setFallbackOffer(runningEngineRef.current === "gemini" ? (blocked ? "policy" : "error") : approvedReasonRef.current);
         if (blocked) {
           setPolicyBlock(blocked);
         } else {
@@ -553,14 +531,25 @@ export function RecordingDetailView({
     [sessionId, buildSessionSnapshot, onSessionSaved, refreshCheckpointStatus],
   );
 
-  async function handleAnalyze() {
+  // engine "openai" only ever comes from the retry button the user clicks
+  // after a Gemini failure (handleOpenAiRetry), with the reason they saw.
+  async function handleAnalyze(engine: AnalysisEngine = "gemini", approvedReason?: UserApprovedFallbackReason) {
     if (isAnalyzing) return;
-    if (!hasSttCheckpoint && !localAudio?.blob) return;
+    if (engine === "gemini" && !hasSttCheckpoint && !localAudio?.blob) return;
 
+    runningEngineRef.current = engine;
+    if (approvedReason) approvedReasonRef.current = approvedReason;
     setIsAnalyzing(true);
     setAnalyzeError(null);
+    setFallbackOffer(null);
 
     try {
+      // Each engine keeps its own STT checkpoint (lib/analysisPipeline.ts) —
+      // a Gemini transcript is never fed to OpenAI or vice versa.
+      const resumeFromCheckpoint = engine === "openai" ? await checkSttCheckpoint(sessionId, "openai") : hasSttCheckpoint;
+      if (!resumeFromCheckpoint && !localAudio?.blob) {
+        throw new Error("OpenAI로 다시 분석하려면 오디오 파일을 다시 불러와주세요.");
+      }
       // Audio (and any reference docs) upload straight from this browser to
       // Vercel Blob storage — never through our own backend — which is what
       // actually avoids Vercel's 4.5MB request-body cap for a 50+ minute
@@ -578,7 +567,7 @@ export function RecordingDetailView({
       // too, no reattach yet) — resuming genuinely doesn't need it.
       let audioBlob: UploadedBlobRef | null = null;
       let audioChunks: Array<UploadedBlobRef & { startMs: number }> | undefined;
-      if (hasSttCheckpoint) {
+      if (resumeFromCheckpoint) {
         setAnalyzeProgress("이전 STT 결과를 불러오는 중...");
       } else {
         const audio = localAudio!;
@@ -593,7 +582,7 @@ export function RecordingDetailView({
         // large recording is split for it too.
         const needsSplit =
           shouldChunk(effectiveDurationMs) ||
-          (effectiveEngine === "openai" && audio.blob.size > OPENAI_MAX_UNSPLIT_BYTES);
+          (engine === "openai" && audio.blob.size > OPENAI_MAX_UNSPLIT_BYTES);
         if (needsSplit) {
           setAnalyzeProgress("오디오 분할 준비 중...");
           const pieces = await splitAudioInBrowser(
@@ -636,7 +625,7 @@ export function RecordingDetailView({
       // approach was still vulnerable to that: the client connection itself
       // gets suspended by the OS, independent of anything the server does).
       let jobId: string;
-      if (effectiveEngine === "openai") {
+      if (engine === "openai") {
         // The OpenAI engine reads reference PDFs/text files as text (labelled
         // with the same global page numbers as slideImages, so the note's
         // ![슬라이드 N](slide_N) placeholders still resolve) and only uploads
@@ -669,6 +658,7 @@ export function RecordingDetailView({
           referenceImages,
           bookmarks,
           keywords,
+          fallbackReason: approvedReasonRef.current,
         });
       } else {
         const referenceBlobs: UploadedBlobRef[] = [];
@@ -698,10 +688,36 @@ export function RecordingDetailView({
     } catch (error) {
       console.error("분석 시작 실패:", error);
       setAnalyzeError(error instanceof Error ? error.message : "분석 중 알 수 없는 오류가 발생했습니다.");
+      // A failed OpenAI retry (e.g. audio not loaded) keeps its button.
+      if (engine === "openai") setFallbackOffer(approvedReasonRef.current);
       setIsAnalyzing(false);
       setAnalyzeProgress("");
     }
   }
+
+  function handleOpenAiRetry() {
+    const reason = fallbackOffer ?? "error";
+    setPolicyBlock(null);
+    void handleAnalyze("openai", reason);
+  }
+
+  const openAiRetry =
+    fallbackOffer && openAiConfigured && !isAnalyzing ? (
+      <div className="mt-3">
+        <button
+          type="button"
+          onClick={handleOpenAiRetry}
+          className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-indigo-200 bg-white px-3 py-2.5 text-sm font-medium text-indigo-700 transition hover:bg-indigo-50 dark:border-indigo-900 dark:bg-zinc-900 dark:text-indigo-300 dark:hover:bg-indigo-950/40"
+        >
+          🚀 다른 LLM(OpenAI)으로 우회하여 분석하기
+        </button>
+        <p className="mt-1.5 break-words text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">
+          누르면 이 녹음을 Gemini 없이 OpenAI(Whisper-1 음성 인식 · gpt-4o-mini 강의노트)로 처음부터 다시 분석해요. 녹음이
+          OpenAI로 전송되고 OpenAI 자체 정책이 적용되며, 사용량만큼 요금이 청구돼요. 참고 PDF는 이미지 대신 추출한 텍스트로
+          전달돼요.
+        </p>
+      </div>
+    ) : null;
 
   // Recovery: if this session has a job id left over in localStorage (set
   // by handleAnalyze above, cleared once resumeJobPolling reaches a
@@ -962,52 +978,9 @@ export function RecordingDetailView({
 
       {!aiResult && (
         <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-            <span id="analysis-engine-label" className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
-              분석 엔진
-            </span>
-            <div
-              role="radiogroup"
-              aria-labelledby="analysis-engine-label"
-              className="inline-flex rounded-full border border-slate-200 bg-slate-100 p-0.5 dark:border-zinc-700 dark:bg-zinc-800"
-            >
-              {ENGINE_OPTIONS.map((option) => {
-                const selected = effectiveEngine === option.value;
-                const unavailable = option.value === "openai" && openAiConfigured === false;
-                return (
-                  <button
-                    key={option.value}
-                    type="button"
-                    role="radio"
-                    aria-checked={selected}
-                    disabled={isAnalyzing || unavailable}
-                    onClick={() => handleEngineChange(option.value)}
-                    className={`rounded-full px-3 py-1 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-50 ${
-                      selected
-                        ? "bg-white text-indigo-600 shadow-sm dark:bg-zinc-900 dark:text-indigo-400"
-                        : "text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
-                    }`}
-                  >
-                    {option.label}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-          {effectiveEngine === "openai" && (
-            <p className="mb-3 break-words text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">
-              OpenAI Whisper-1(음성 인식)와 GPT(강의노트 작성)로만 처리하며 Gemini는 호출하지 않아요. 참고 PDF는 이미지 대신
-              추출한 텍스트로 전달되고, 사용량만큼 OpenAI 요금이 청구돼요.
-            </p>
-          )}
-          {openAiConfigured === false && (
-            <p className="mb-3 break-words text-[11px] text-zinc-400 dark:text-zinc-500">
-              OpenAI 엔진을 쓰려면 서버에 OPENAI_API_KEY를 설정해야 해요.
-            </p>
-          )}
           <button
             type="button"
-            onClick={handleAnalyze}
+            onClick={() => void handleAnalyze()}
             disabled={isAnalyzing || (!localAudio && !hasSttCheckpoint)}
             className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:bg-indigo-300 dark:disabled:bg-indigo-900"
           >
@@ -1032,6 +1005,7 @@ export function RecordingDetailView({
           {analyzeError && (
             <p className="mt-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600 dark:bg-red-950/40 dark:text-red-400">{analyzeError}</p>
           )}
+          {openAiRetry}
         </div>
       )}
 
@@ -1062,7 +1036,11 @@ export function RecordingDetailView({
         </div>
       )}
 
-      {policyBlock && <PolicyBlockedModal detail={policyBlock.detail} onClose={() => setPolicyBlock(null)} />}
+      {policyBlock && (
+        <PolicyBlockedModal detail={policyBlock.detail} onClose={() => setPolicyBlock(null)}>
+          {openAiRetry}
+        </PolicyBlockedModal>
+      )}
     </div>
   );
 }

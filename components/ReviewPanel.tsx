@@ -463,7 +463,11 @@ export function ReviewPanel({
           <>
             {aiResult.engine === "openai" && (
               <p className="mb-3 break-words rounded-lg bg-indigo-50 px-3 py-2 text-xs text-indigo-700 dark:bg-indigo-950/40 dark:text-indigo-300">
-                🤖 직접 선택한 OpenAI 엔진(Whisper-1 음성 인식 · GPT 강의노트)으로 분석한 노트입니다.
+                {aiResult.userApprovedFallback === "policy"
+                  ? "🤖 정책 차단으로 인해 사용자가 직접 대체 AI 엔진을 승인하여 분석을 완료했습니다."
+                  : aiResult.userApprovedFallback === "error"
+                    ? "🤖 Gemini 분석 실패로 인해 사용자가 직접 대체 AI 엔진을 승인하여 분석을 완료했습니다."
+                    : "🤖 OpenAI 엔진(Whisper-1 음성 인식 · GPT 강의노트)으로 분석한 노트입니다."}
               </p>
             )}
             {aiResult.blockedChunks && aiResult.blockedChunks.length > 0 && (

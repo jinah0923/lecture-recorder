@@ -1,12 +1,20 @@
 // Server-side pieces shared by both analysis engines —
 // app/api/transcribe-and-summarize (Gemini) and app/api/transcribe-openai
-// (OpenAI, chosen by the user in RecordingDetailView). Both write the same
+// (OpenAI, started only from the retry button RecordingDetailView shows after
+// a failed Gemini analysis). Both write the same
 // job record under `job:{jobId}`, so the client polls either one through
 // transcribe-and-summarize's GET ?jobId= and gets the same result shape.
 
 import { stripMarkTags } from "@/lib/inlineMarkdown";
 import { getRedisClient } from "@/lib/redis";
-import type { AiResult, AnalysisEngine, BlockedChunkNotice, ChecklistItem, TranscriptSegment } from "@/lib/types";
+import type {
+  AiResult,
+  AnalysisEngine,
+  BlockedChunkNotice,
+  ChecklistItem,
+  TranscriptSegment,
+  UserApprovedFallbackReason,
+} from "@/lib/types";
 
 export type AnalysisResult = AiResult;
 
@@ -216,9 +224,16 @@ export function buildAnalysisResult(
   sttSegments: unknown,
   hasSpeechFlag: boolean,
   analysisResult: RawAnalysisResponse,
-  options: { blockedChunks?: BlockedChunkNotice[]; engine?: AnalysisEngine } = {},
+  options: {
+    blockedChunks?: BlockedChunkNotice[];
+    engine?: AnalysisEngine;
+    userApprovedFallback?: UserApprovedFallbackReason;
+  } = {},
 ): AnalysisResult {
-  const engine = options.engine === "openai" ? { engine: "openai" as const } : {};
+  const engine = {
+    ...(options.engine === "openai" ? { engine: "openai" as const } : {}),
+    ...(options.userApprovedFallback ? { userApprovedFallback: options.userApprovedFallback } : {}),
+  };
   const rawSegments = Array.isArray(sttSegments) ? sttSegments : [];
   const hasSpeech = hasSpeechFlag && rawSegments.length > 0;
 

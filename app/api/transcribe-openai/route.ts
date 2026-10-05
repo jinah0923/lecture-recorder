@@ -16,9 +16,11 @@ import type { AnalysisResult, AudioChunkRef, BlobRef, CheckpointSegment, Incomin
 import { buildAnalysisPrompt } from "@/lib/analysisPrompt";
 import { OPENAI_KEY_MISSING_MESSAGE, analyzeWithOpenAi, openAiApiKey, transcribeWithWhisper } from "@/lib/openai";
 import { isRedisConfigured } from "@/lib/redis";
+import type { UserApprovedFallbackReason } from "@/lib/types";
 
-// The "OpenAI" analysis engine, chosen explicitly by the user before
-// starting (components/RecordingDetailView.tsx) — an independent pipeline
+// The "OpenAI" analysis engine — only ever started by the user, from the
+// retry button RecordingDetailView shows after a Gemini analysis fails
+// (never automatically). An independent pipeline
 // that never calls Gemini: Whisper transcribes, then a GPT model writes the
 // lecture note from the transcript with the same prompt rules the Gemini
 // engine uses (lib/analysisPrompt.ts). Same job-queue shape as
@@ -53,6 +55,8 @@ type AnalyzeRequestBody = {
   referenceImages?: unknown;
   bookmarks?: unknown;
   keywords?: unknown;
+  // Why the user approved this run (see AiResult.userApprovedFallback).
+  fallbackReason?: unknown;
 };
 
 async function downloadBlob(ref: BlobRef): Promise<{ data: Blob; mimeType: string }> {
@@ -126,6 +130,7 @@ async function analyze(
   referenceImages: BlobRef[],
   bookmarks: IncomingBookmark[],
   keywords: string[],
+  fallbackReason: UserApprovedFallbackReason,
 ): Promise<AnalysisResult> {
   await reportStage(jobId, "OpenAI 강의노트 작성 중...");
   const imageDataUrls = await loadReferenceImages(referenceImages);
@@ -165,7 +170,7 @@ async function analyze(
     promptChars: userPrompt.length,
   });
   const raw = await analyzeWithOpenAi(apiKey, prompt.systemInstruction, userPrompt, imageDataUrls);
-  return buildAnalysisResult(checkpoint.segments, true, raw, { engine: "openai" });
+  return buildAnalysisResult(checkpoint.segments, true, raw, { engine: "openai", userApprovedFallback: fallbackReason });
 }
 
 async function runOpenAiJob(
@@ -178,6 +183,7 @@ async function runOpenAiJob(
   referenceImages: BlobRef[],
   bookmarks: IncomingBookmark[],
   keywords: string[],
+  fallbackReason: UserApprovedFallbackReason,
 ): Promise<AnalysisResult> {
   try {
     let checkpoint = await readSttCheckpoint(sessionId, "openai");
@@ -186,7 +192,7 @@ async function runOpenAiJob(
     } else {
       const segments = await transcribe(apiKey, jobId, audioBlobRef, audioChunks, keywords);
       if (segments.length === 0) {
-        return buildAnalysisResult([], false, {}, { engine: "openai" });
+        return buildAnalysisResult([], false, {}, { engine: "openai", userApprovedFallback: fallbackReason });
       }
       checkpoint = { createdAt: Date.now(), transcriptText: segmentsToTranscriptText(segments), segments, hasSpeech: true };
       // Same STAGE 1 checkpoint idea as the Gemini engine — a stage-2
@@ -194,7 +200,7 @@ async function runOpenAiJob(
       // cost a second round of Whisper on retry.
       await writeSttCheckpoint(sessionId, "openai", checkpoint);
     }
-    return await analyze(apiKey, jobId, checkpoint, referenceTexts, referenceImages, bookmarks, keywords);
+    return await analyze(apiKey, jobId, checkpoint, referenceTexts, referenceImages, bookmarks, keywords, fallbackReason);
   } finally {
     // Normally already deleted right after download; covers pieces a
     // failure kept us from reaching.
@@ -287,6 +293,8 @@ export async function POST(request: Request) {
     ? body.keywords.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
     : [];
 
+  const fallbackReason: UserApprovedFallbackReason = body.fallbackReason === "policy" ? "policy" : "error";
+
   const jobId = crypto.randomUUID();
   await writeJobRecord(jobId, { status: "processing", createdAt: Date.now() });
 
@@ -302,6 +310,7 @@ export async function POST(request: Request) {
         referenceImages,
         bookmarks,
         keywords,
+        fallbackReason,
       );
       await writeJobRecord(jobId, { status: "completed", createdAt: Date.now(), result });
       await deleteSttCheckpoint(sessionId, "openai");
@@ -318,7 +327,7 @@ export async function POST(request: Request) {
   return NextResponse.json({ jobId });
 }
 
-// ?status=1 -> { configured } (whether the engine picker can offer OpenAI)
+// ?status=1 -> { configured } (whether the retry button can offer OpenAI)
 // ?checkpointFor=<sessionId> -> { hasCheckpoint } (OpenAI's own STT checkpoint)
 export async function GET(request: Request) {
   const url = new URL(request.url);

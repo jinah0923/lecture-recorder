@@ -1,6 +1,12 @@
 "use client";
 
-import type { AnalysisEngine, BlockedChunkNotice, ChecklistItem, TranscriptSegment } from "@/lib/types";
+import type {
+  AnalysisEngine,
+  BlockedChunkNotice,
+  ChecklistItem,
+  TranscriptSegment,
+  UserApprovedFallbackReason,
+} from "@/lib/types";
 
 export type AnalysisJobResult = {
   transcript: TranscriptSegment[];
@@ -10,6 +16,7 @@ export type AnalysisJobResult = {
   checklist: ChecklistItem[];
   blockedChunks?: BlockedChunkNotice[];
   engine?: AnalysisEngine;
+  userApprovedFallback?: UserApprovedFallbackReason;
 };
 
 export type BlobRefPayload = {
@@ -47,6 +54,7 @@ export type OpenAiAnalyzeRequestPayload = {
   referenceImages: BlobRefPayload[];
   bookmarks: unknown[];
   keywords: string[];
+  fallbackReason: UserApprovedFallbackReason;
 };
 
 // Whisper's per-file limit is 25MB — anything bigger is split in the browser
@@ -186,8 +194,8 @@ export async function checkSttCheckpoint(sessionId: string, engine: AnalysisEngi
   }
 }
 
-// Whether the server has OPENAI_API_KEY — drives whether the engine picker
-// offers OpenAI at all. Unknown (network failure) counts as unavailable.
+// Whether the server has OPENAI_API_KEY — drives whether a failed Gemini
+// analysis offers the OpenAI retry button at all. Unknown (network failure) counts as unavailable.
 export async function fetchOpenAiEngineStatus(): Promise<{ configured: boolean }> {
   try {
     const response = await fetch("/api/transcribe-openai?status=1");
