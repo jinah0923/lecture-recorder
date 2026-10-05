@@ -33,6 +33,7 @@ const PDF_CALLOUT_STYLES: CalloutStyle[] = [
   { emoji: "🚨", bg: "#fee2e2", border: "#f87171", text: "#7f1d1d", borderWidth: "2px", bold: true },
   { emoji: "🔥", bg: "#fef2f2", border: "#fecaca", text: "#991b1b" },
   { emoji: "💡", bg: "#fefce8", border: "#fef08a", text: "#854d0e" },
+  { emoji: "▲", bg: "#ecfdf5", border: "#a7f3d0", text: "#065f46" },
   { emoji: "🗣️", bg: "#eff6ff", border: "#bfdbfe", text: "#1e40af" },
   { emoji: "💜", bg: "#f5f3ff", border: "#ddd6fe", text: "#5b21b6" },
 ];

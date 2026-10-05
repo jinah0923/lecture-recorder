@@ -7,7 +7,7 @@ import {
   readResponseText,
 } from "@/lib/gemini";
 import type { Part } from "@google/genai";
-import { EQUATION_FORMAT_RULE, VERBATIM_TERMINOLOGY_RULE } from "@/lib/promptRules";
+import { EQUATION_FORMAT_RULE, JOURNAL_ENTRY_RULE, VERBATIM_TERMINOLOGY_RULE } from "@/lib/promptRules";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -243,6 +243,7 @@ export async function POST(request: Request) {
       "작성하세요.",
     LATEX_BAN_RULE,
     EQUATION_FORMAT_RULE,
+    JOURNAL_ENTRY_RULE,
   ]
     .filter(Boolean)
     .join(" ");

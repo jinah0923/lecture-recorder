@@ -64,6 +64,7 @@ type ExportRequestBody = {
 // is enough for structural assignment into callout.color below.
 type NotionCalloutColor =
   | "gray_background"
+  | "green_background"
   | "red_background"
   | "yellow_background"
   | "orange_background"
@@ -79,6 +80,7 @@ const CALLOUT_COLOR_BY_EMOJI: Record<string, NotionCalloutColor> = {
   "🚨": "red_background",
   "🔥": "yellow_background",
   "💡": "orange_background",
+  "▲": "green_background",
   "🗣️": "blue_background",
   "💜": "purple_background",
 };
@@ -86,6 +88,8 @@ const CALLOUT_COLOR_BY_EMOJI: Record<string, NotionCalloutColor> = {
 // the on-screen (lib/markdown.tsx) and PDF (lib/pdfExport.ts) renderers,
 // which also give 🚨 a visually heavier treatment than the rest.
 const BOLD_CALLOUT_EMOJIS = new Set(["🚨"]);
+// A callout icon must be a real emoji; "▲" (the note's 필기 팁 marker) isn't one.
+const NOTION_ICON_BY_MARKER: Record<string, string> = { "▲": "📝" };
 const CALLOUT_EMOJIS = Object.keys(CALLOUT_COLOR_BY_EMOJI);
 
 function chunkText(text: string, maxLen: number): string[] {
@@ -175,7 +179,7 @@ function emojiCalloutBlock(line: string, emoji: string): BlockObjectRequest {
   return {
     type: "callout",
     callout: {
-      icon: { type: "emoji", emoji },
+      icon: { type: "emoji", emoji: NOTION_ICON_BY_MARKER[emoji] ?? emoji },
       color: CALLOUT_COLOR_BY_EMOJI[emoji],
       rich_text: buildRichText(
         stripCalloutEmoji(line, emoji),
