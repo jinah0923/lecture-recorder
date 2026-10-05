@@ -1,7 +1,16 @@
 "use client";
 
 import { tokenizeInline } from "@/lib/inlineMarkdown";
-import { isCodeFence, matchEquationLine, matchQuoteLine, readCodeFence, readMatchingRun } from "@/lib/noteBlocks";
+import {
+  buildListTree,
+  isCodeFence,
+  matchEquationLine,
+  matchQuoteLine,
+  parseListLine,
+  readCodeFence,
+  readMatchingRun,
+} from "@/lib/noteBlocks";
+import type { ListLine, ListNode } from "@/lib/noteBlocks";
 import type { ChecklistItem, TranscriptSegment } from "@/lib/types";
 
 // html2canvas cannot parse modern CSS color functions (e.g. Tailwind v4's
@@ -149,37 +158,63 @@ const SLIDE_IMAGE_PATTERN = /^!\[[^\]]*\]\(slide_(\d+)\)$/;
 // URL the AI cited for "AI 심화 탐구" (see app/api/expand-note/route.ts).
 const IMAGE_PATTERN = /^!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)$/;
 
-function renderMarkdownToHtml(markdown: string, slideImages?: Map<number, string>): string {
+// Bullet style per nesting level, like a browser's default nested lists.
+const BULLET_STYLES = ["disc", "circle", "square"];
+
+// Nested lists, mirroring lib/markdown.tsx's renderListNodes: one <ul>/<ol>
+// per nesting level, split into separate lists wherever bullets switch to
+// numbers or back, and a callout or formula item rendered as its own box
+// with its sub-items still nested below it.
+function renderListHtml(nodes: ListNode[], depth: number): string {
+  let html = "";
+  let start = 0;
+  while (start < nodes.length) {
+    const ordered = nodes[start].ordered;
+    let end = start;
+    while (end < nodes.length && nodes[end].ordered === ordered) end++;
+    const itemsHtml = nodes
+      .slice(start, end)
+      .map((node) => {
+        const nested = node.children.length > 0 ? renderListHtml(node.children, depth + 1) : "";
+        const equation = matchEquationLine(node.text);
+        if (equation !== null) {
+          return `<li style="list-style:none;margin-left:-18px;">${renderEquationHtml([equation])}${nested}</li>`;
+        }
+        const callout = detectCallout(node.text);
+        if (callout) {
+          return (
+            `<li style="list-style:none;margin-left:-18px;">` +
+            `<div ${AVOID_BREAK_ATTR} style="${AVOID_BREAK_STYLE}border:${callout.borderWidth ?? "1px"} solid ${callout.border};border-radius:8px;padding:8px 12px;margin:4px 0;font-size:12.5px;background:${callout.bg};color:${callout.text};${callout.bold ? "font-weight:600;" : ""}">${renderInlineHtml(stripBlockquotePrefix(node.text))}</div>` +
+            `${nested}</li>`
+          );
+        }
+        return `<li style="${BODY_STYLE}">${renderInlineHtml(node.text)}${nested}</li>`;
+      })
+      .join("");
+    const tag = ordered ? "ol" : "ul";
+    // Keeps the source numbering when a numbered list doesn't start at 1.
+    const firstNumber = ordered ? parseInt(nodes[start].marker, 10) : 1;
+    const startAttr = ordered && firstNumber > 1 ? ` start="${firstNumber}"` : "";
+    const listStyle = ordered ? "decimal" : BULLET_STYLES[depth % BULLET_STYLES.length];
+    html +=
+      `<${tag}${startAttr} style="margin:${depth === 0 ? "6px 0" : "4px 0 0"};padding-left:18px;list-style-type:${listStyle};display:flex;flex-direction:column;gap:4px;">` +
+      `${itemsHtml}</${tag}>`;
+    start = end;
+  }
+  return html;
+}
+
+export function renderMarkdownToHtml(markdown: string, slideImages?: Map<number, string>): string {
   const lines = markdown.split("\n");
   const blocks: string[] = [];
-  let listBuffer: string[] = [];
+  let listBuffer: ListLine[] = [];
   let index = 0;
 
   function flushList() {
     if (listBuffer.length === 0) return;
     const items = listBuffer;
     listBuffer = [];
-
-    if (items.some((item) => detectCallout(item) || matchEquationLine(item) !== null)) {
-      const itemsHtml = items
-        .map((item) => {
-          const equation = matchEquationLine(item);
-          if (equation !== null) return renderEquationHtml([equation]);
-          const callout = detectCallout(item);
-          if (callout) {
-            return `<div ${AVOID_BREAK_ATTR} style="${AVOID_BREAK_STYLE}border:${callout.borderWidth ?? "1px"} solid ${callout.border};border-radius:8px;padding:8px 12px;font-size:12.5px;background:${callout.bg};color:${callout.text};${callout.bold ? "font-weight:600;" : ""}">${renderInlineHtml(item)}</div>`;
-          }
-          return `<ul style="margin:0;padding-left:18px;list-style-type:disc;"><li style="${BODY_STYLE}">${renderInlineHtml(item)}</li></ul>`;
-        })
-        .join("");
-      blocks.push(`<div style="display:flex;flex-direction:column;gap:6px;margin:6px 0;">${itemsHtml}</div>`);
-      return;
-    }
-
-    const liHtml = items.map((item) => `<li style="${BODY_STYLE}">${renderInlineHtml(item)}</li>`).join("");
-    blocks.push(
-      `<ul style="margin:6px 0;padding-left:18px;list-style-type:disc;display:flex;flex-direction:column;gap:4px;">${liHtml}</ul>`,
-    );
+    blocks.push(renderListHtml(buildListTree(items), 0));
   }
 
   while (index < lines.length) {
@@ -252,9 +287,11 @@ function renderMarkdownToHtml(markdown: string, slideImages?: Map<number, string
       continue;
     }
 
-    const bulletMatch = line.match(/^[-*•]\s+(.*)$/);
-    if (bulletMatch) {
-      listBuffer.push(bulletMatch[1]);
+    // Depth comes from the raw line's indentation (see parseListLine), so
+    // sub-bullets nest instead of flattening; numbered items become an <ol>.
+    const listLine = parseListLine(rawLine);
+    if (listLine) {
+      listBuffer.push(listLine);
       index++;
       continue;
     }
@@ -323,7 +360,7 @@ function renderMarkdownToHtml(markdown: string, slideImages?: Map<number, string
       while (cursor < lines.length) {
         const nextLine = lines[cursor].trim();
         if (!nextLine) break;
-        if (/^[-*•]\s+/.test(nextLine)) break;
+        if (parseListLine(nextLine)) break;
         if (/^#{1,4}\s+/.test(nextLine)) break;
         if (nextLine.startsWith("|")) break;
         if (SLIDE_IMAGE_PATTERN.test(nextLine) || IMAGE_PATTERN.test(nextLine)) break;
