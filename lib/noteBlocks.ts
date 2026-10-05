@@ -57,3 +57,69 @@ export function readMatchingRun(
   }
   return { items, next: cursor };
 }
+
+// ---- Lists ----------------------------------------------------------------
+// One parser for list lines, shared by the screen renderer, the Notion export
+// and the clipboard/.md export, so all three agree on what nests under what.
+
+export type ListLine = { depth: number; ordered: boolean; marker: string; text: string };
+export type ListNode = ListLine & { children: ListNode[] };
+
+// Indent width with tabs counted as 4 columns; every 2 columns is one level
+// (the note prompt writes sub-bullets with 2-space indents).
+function indentWidth(rawLine: string): number {
+  const leading = rawLine.match(/^[ \t]*/)?.[0] ?? "";
+  return leading.replace(/\t/g, "    ").length;
+}
+
+export function parseListLine(rawLine: string): ListLine | null {
+  const line = rawLine.trim();
+  const bullet = line.match(/^([-*•])\s+(.*)$/);
+  const ordered = line.match(/^(\d+[.)])\s+(.*)$/);
+  const match = bullet ?? ordered;
+  if (!match) return null;
+  return { depth: Math.floor(indentWidth(rawLine) / 2), ordered: !!ordered, marker: match[1], text: match[2] };
+}
+
+// Turns a flat, depth-tagged run of list lines into a proper tree — each
+// item's children are whatever immediately-following items sit at a
+// strictly greater depth, matching standard nested-markdown-list semantics.
+// A jump of several levels at once still nests just one level deeper.
+export function buildListTree(items: ListLine[]): ListNode[] {
+  const roots: ListNode[] = [];
+  const stack: ListNode[] = [];
+  for (const item of items) {
+    const node: ListNode = { ...item, children: [] };
+    while (stack.length > 0 && stack[stack.length - 1].depth >= node.depth) stack.pop();
+    (stack.length === 0 ? roots : stack[stack.length - 1].children).push(node);
+    stack.push(node);
+  }
+  return roots;
+}
+
+// The note as Notion's markdown paste expects it: nested list items indented
+// by exactly 4 spaces per level (Notion flattens 2-space indents), and "•"
+// bullets — which the in-app renderer accepts but markdown doesn't — turned
+// into "-". Levels come from the actual nesting (buildListTree's rules), not a
+// blind 2→4 substitution, so 2-space, 4-space or mixed indents all map to
+// consecutive levels. Code fences are left untouched.
+export function toNotionPasteMarkdown(markdown: string): string {
+  const out: string[] = [];
+  const stack: number[] = [];
+  let inFence = false;
+  for (const rawLine of markdown.split("\n")) {
+    if (isCodeFence(rawLine)) inFence = !inFence;
+    const item = inFence ? null : parseListLine(rawLine);
+    if (!item) {
+      // Anything that isn't a list line ends the run, same as the renderer.
+      stack.length = 0;
+      out.push(rawLine);
+      continue;
+    }
+    while (stack.length > 0 && stack[stack.length - 1] >= item.depth) stack.pop();
+    const level = stack.length;
+    stack.push(item.depth);
+    out.push(`${"    ".repeat(level)}${item.ordered ? item.marker : "-"} ${item.text}`);
+  }
+  return out.join("\n");
+}

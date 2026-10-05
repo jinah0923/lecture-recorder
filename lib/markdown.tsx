@@ -2,7 +2,16 @@ import { Fragment, type ReactNode } from "react";
 import { MarkdownImage } from "@/components/MarkdownImage";
 import { SlideImage } from "@/components/SlideImage";
 import { tokenizeInline } from "@/lib/inlineMarkdown";
-import { isCodeFence, matchEquationLine, matchQuoteLine, readCodeFence, readMatchingRun } from "@/lib/noteBlocks";
+import {
+  buildListTree,
+  isCodeFence,
+  matchEquationLine,
+  matchQuoteLine,
+  parseListLine,
+  readCodeFence,
+  readMatchingRun,
+} from "@/lib/noteBlocks";
+import type { ListLine, ListNode } from "@/lib/noteBlocks";
 
 const CALLOUT_STYLES: Array<{ emoji: string; className: string }> = [
   // Deliberately bolder than every other callout below (thicker border,
@@ -141,27 +150,6 @@ const SLIDE_IMAGE_PATTERN = /^!\[[^\]]*\]\(slide_(\d+)\)$/;
 // instead of a real URL.
 const IMAGE_PATTERN = /^!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)$/;
 
-type FlatListItem = { depth: number; ordered: boolean; text: string };
-type ListNode = FlatListItem & { children: ListNode[] };
-
-// Turns a flat, depth-tagged run of list lines into a proper tree — each
-// item's children are whatever immediately-following items sit at a
-// strictly greater depth, matching standard nested-markdown-list semantics.
-function buildListTree(items: FlatListItem[]): ListNode[] {
-  const roots: ListNode[] = [];
-  const stack: ListNode[] = [];
-
-  for (const item of items) {
-    const node: ListNode = { ...item, children: [] };
-    while (stack.length > 0 && stack[stack.length - 1].depth >= node.depth) {
-      stack.pop();
-    }
-    (stack.length === 0 ? roots : stack[stack.length - 1].children).push(node);
-    stack.push(node);
-  }
-  return roots;
-}
-
 // Renders a tree level as one or more <ul>/<ol> — split into separate lists
 // wherever the ordered/unordered marker changes, so e.g. a bullet list
 // followed by a numbered list (both at the same depth) render as two
@@ -225,7 +213,7 @@ function renderListNodes(nodes: ListNode[], keyPrefix: string): ReactNode[] {
 export function renderMarkdown(markdown: string, slideImages?: Map<number, string>): ReactNode {
   const lines = markdown.split("\n");
   const blocks: ReactNode[] = [];
-  let listBuffer: FlatListItem[] = [];
+  let listBuffer: ListLine[] = [];
   let index = 0;
 
   function flushList(key: string) {
@@ -351,16 +339,11 @@ export function renderMarkdown(markdown: string, slideImages?: Map<number, strin
       continue;
     }
 
-    const bulletMatch = line.match(/^[-*•]\s+(.*)$/);
-    const orderedMatch = line.match(/^\d+[.)]\s+(.*)$/);
-    if (bulletMatch || orderedMatch) {
-      // Depth is read from the original (untrimmed) line's leading
-      // whitespace — `line` above has already had it stripped — so a
-      // sub-bullet indented under its parent renders as an actual nested
-      // list rather than flattening into the same level.
-      const leadingSpaces = rawLine.length - rawLine.trimStart().length;
-      const depth = Math.floor(leadingSpaces / 2);
-      listBuffer.push({ depth, ordered: !!orderedMatch, text: (bulletMatch ?? orderedMatch)![1] });
+    // Depth comes from the original (untrimmed) line's indentation, so a
+    // sub-bullet renders as an actual nested list (see parseListLine).
+    const listLine = parseListLine(rawLine);
+    if (listLine) {
+      listBuffer.push(listLine);
       index++;
       continue;
     }

@@ -4,13 +4,27 @@ import type { BlockObjectRequest } from "@notionhq/client";
 import { extractNotionId } from "@/lib/notionUtils";
 import { formatDuration } from "@/lib/format";
 import { tokenizeInline } from "@/lib/inlineMarkdown";
-import { EQUATION_MARKER, isCodeFence, matchEquationLine, matchQuoteLine, readCodeFence, readMatchingRun } from "@/lib/noteBlocks";
+import {
+  EQUATION_MARKER,
+  buildListTree,
+  isCodeFence,
+  matchEquationLine,
+  matchQuoteLine,
+  parseListLine,
+  readCodeFence,
+  readMatchingRun,
+} from "@/lib/noteBlocks";
+import type { ListLine, ListNode } from "@/lib/noteBlocks";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
 const RICH_TEXT_CHAR_LIMIT = 2000;
+// Notion's limits per append request: at most 100 blocks in any one
+// children array, and at most 1000 block elements in total (nested ones
+// included).
 const BLOCKS_PER_REQUEST = 100;
+const MAX_BLOCK_ELEMENTS_PER_REQUEST = 1000;
 // Real lecture transcripts can run to hundreds of segments; cap how many we
 // push into the toggle so one export can't balloon into hundreds of Notion
 // API calls and blow the function's time budget.
@@ -22,17 +36,15 @@ type NotionRichText = {
   annotations?: { bold?: boolean; color?: NotionCalloutColor };
 };
 
-// A plain paragraph block has no children of its own, so it structurally
-// satisfies Notion's "single level of children" constraint for blocks
-// nested one level deep (e.g. inside the transcript toggle below) — unlike
-// the broader, recursively-nested `BlockObjectRequest` union type.
-type NotionParagraphBlock = { type: "paragraph"; paragraph: { rich_text: NotionRichText[] } };
+// A block plus the blocks nested under it (sub-bullets under a bullet,
+// toggle contents). Kept as a tree until appendBlockTree sends it, which puts
+// each block's children inside the parent's own `children` — so Notion keeps
+// the nesting instead of every item landing flat at the top level.
+type BlockNode = { block: BlockObjectRequest; children: BlockNode[] };
 
-// The single-level-children constraint above applies to convertLectureNoteToBlocks'
-// own <details> -> toggle conversion too (see below) — this derives the SDK's
-// exact expected children type from BlockObjectRequest itself (the type
-// isn't exported under its own name) rather than redeclaring it by hand.
-type ToggleChildBlocks = NonNullable<Extract<BlockObjectRequest, { type?: "toggle" }>["toggle"]["children"]>;
+function leaf(block: BlockObjectRequest): BlockNode {
+  return { block, children: [] };
+}
 
 type IncomingChecklistItem = { text?: unknown; done?: unknown };
 type IncomingTranscriptSegment = { startMs?: unknown; text?: unknown };
@@ -75,12 +87,6 @@ const CALLOUT_COLOR_BY_EMOJI: Record<string, NotionCalloutColor> = {
 // which also give 🚨 a visually heavier treatment than the rest.
 const BOLD_CALLOUT_EMOJIS = new Set(["🚨"]);
 const CALLOUT_EMOJIS = Object.keys(CALLOUT_COLOR_BY_EMOJI);
-
-function chunkArray<T>(items: T[], size: number): T[][] {
-  const chunks: T[][] = [];
-  for (let i = 0; i < items.length; i += size) chunks.push(items.slice(i, i + size));
-  return chunks;
-}
 
 function chunkText(text: string, maxLen: number): string[] {
   if (text.length <= maxLen) return [text];
@@ -151,21 +157,63 @@ function isTableSeparatorRow(line: string): boolean {
   return cells.length > 0 && cells.every((cell) => /^:?-+:?$/.test(cell));
 }
 
+// Formula lines (`> 🧮 ...`) -> a gray, bold 🧮 callout, one line per
+// formula. Not Notion's native equation block: that takes KaTeX, and these
+// formulas are plain text with Korean terms (자산 = 부채 + 자본).
+function equationCalloutBlock(equations: string[]): BlockObjectRequest {
+  return {
+    type: "callout",
+    callout: {
+      icon: { type: "emoji", emoji: EQUATION_MARKER },
+      color: "gray_background",
+      rich_text: buildRichText(equations.join("\n"), true),
+    },
+  };
+}
+
+function emojiCalloutBlock(line: string, emoji: string): BlockObjectRequest {
+  return {
+    type: "callout",
+    callout: {
+      icon: { type: "emoji", emoji },
+      color: CALLOUT_COLOR_BY_EMOJI[emoji],
+      rich_text: buildRichText(
+        stripCalloutEmoji(line, emoji),
+        BOLD_CALLOUT_EMOJIS.has(emoji),
+        CALLOUT_COLOR_BY_EMOJI[emoji] === "yellow_background" ? "orange_background" : "yellow_background",
+      ),
+    },
+  };
+}
+
+// One list item and its sub-items. A list item that's itself a callout or
+// formula line becomes that block (with the sub-items still nested under
+// it), matching how lib/markdown.tsx renders it on screen.
+function listNodeToBlock(node: ListNode): BlockNode {
+  const children = node.children.map(listNodeToBlock);
+  const equation = matchEquationLine(node.text);
+  if (equation !== null) return { block: equationCalloutBlock([equation]), children };
+  const emoji = detectCalloutEmoji(node.text);
+  if (emoji) return { block: emojiCalloutBlock(node.text, emoji), children };
+  const rich_text = buildRichText(node.text);
+  return {
+    block: node.ordered
+      ? { type: "numbered_list_item", numbered_list_item: { rich_text } }
+      : { type: "bulleted_list_item", bulleted_list_item: { rich_text } },
+    children,
+  };
+}
+
 /**
- * Converts the app's lightweight lecture-note markdown (headings, bullets,
- * **bold**, and 🔥/💡/🗣️/💜 callout lines — see lib/markdown.tsx, the
- * in-app renderer this mirrors) into Notion's official block objects.
+ * Converts the app's lightweight lecture-note markdown (headings, nested
+ * bullets/numbered lists, **bold**, callout and formula lines, tables,
+ * toggles — see lib/markdown.tsx, the in-app renderer this mirrors) into a
+ * tree of Notion block objects.
  */
-// depth > 0 means "already inside a toggle's own children" — Notion's API
-// only accepts one level of nested children per request, so a <details>
-// line encountered there is left as literal text (via the final plain-
-// paragraph fallback below) rather than expanded into a second toggle,
-// which both keeps the request valid and makes the cast in the depth === 0
-// branch below provably safe (nothing this function returns at depth > 0
-// can itself carry a `children` field).
-function convertLectureNoteToBlocks(markdown: string, depth = 0): BlockObjectRequest[] {
+function convertLectureNoteToBlocks(markdown: string): BlockNode[] {
   const lines = markdown.split("\n");
-  const blocks: BlockObjectRequest[] = [];
+  const blocks: BlockNode[] = [];
+  const push = (block: BlockObjectRequest) => blocks.push(leaf(block));
   let index = 0;
 
   while (index < lines.length) {
@@ -178,7 +226,7 @@ function convertLectureNoteToBlocks(markdown: string, depth = 0): BlockObjectReq
     // Fenced code block -> Notion's own code block, verbatim.
     if (isCodeFence(line)) {
       const { code, next } = readCodeFence(lines, index);
-      blocks.push({
+      push({
         type: "code",
         code: {
           language: "plain text",
@@ -189,19 +237,9 @@ function convertLectureNoteToBlocks(markdown: string, depth = 0): BlockObjectReq
       continue;
     }
 
-    // Formula lines (`> 🧮 ...`) -> a gray, bold 🧮 callout, one line per
-    // formula. Not Notion's native equation block: that takes KaTeX, and
-    // these formulas are plain text with Korean terms (자산 = 부채 + 자본).
     if (matchEquationLine(line) !== null) {
       const { items, next } = readMatchingRun(lines, index, matchEquationLine);
-      blocks.push({
-        type: "callout",
-        callout: {
-          icon: { type: "emoji", emoji: EQUATION_MARKER },
-          color: "gray_background",
-          rich_text: buildRichText(items.join("\n"), true),
-        },
-      });
+      push(equationCalloutBlock(items));
       index = next;
       continue;
     }
@@ -210,7 +248,7 @@ function convertLectureNoteToBlocks(markdown: string, depth = 0): BlockObjectReq
     // for the on-screen version this mirrors. Notion has a native toggle
     // block for exactly this (already used below for the transcript), so
     // it maps directly rather than needing a fallback representation.
-    if (line === "<details>" && depth === 0) {
+    if (line === "<details>") {
       let cursor = index + 1;
       let summaryText = "부가 정보";
       const summaryMatch = cursor < lines.length ? lines[cursor].trim().match(/^<summary>(.*)<\/summary>$/) : null;
@@ -223,10 +261,9 @@ function convertLectureNoteToBlocks(markdown: string, depth = 0): BlockObjectReq
         innerLines.push(lines[cursor]);
         cursor++;
       }
-      const children = convertLectureNoteToBlocks(innerLines.join("\n"), depth + 1) as ToggleChildBlocks;
       blocks.push({
-        type: "toggle",
-        toggle: { rich_text: buildRichText(summaryText), children },
+        block: { type: "toggle", toggle: { rich_text: buildRichText(summaryText) } },
+        children: convertLectureNoteToBlocks(innerLines.join("\n")),
       });
       index = cursor + 1;
       continue;
@@ -256,7 +293,7 @@ function convertLectureNoteToBlocks(markdown: string, depth = 0): BlockObjectReq
           cells: Array.from({ length: tableWidth }, (_, cellIndex) => buildRichText(cells[cellIndex] ?? "")),
         },
       });
-      blocks.push({
+      push({
         type: "table",
         table: {
           table_width: tableWidth,
@@ -275,7 +312,7 @@ function convertLectureNoteToBlocks(markdown: string, depth = 0): BlockObjectReq
         continue; // orphaned separator row (no header row before it) — skip
       }
       const cells = splitTableRow(line);
-      blocks.push({
+      push({
         type: "paragraph",
         paragraph: { rich_text: buildRichText(cells.join("  ·  ")) },
       });
@@ -288,21 +325,26 @@ function convertLectureNoteToBlocks(markdown: string, depth = 0): BlockObjectReq
       const level = headingMatch[1].length;
       const richText = buildRichText(headingMatch[2]);
       if (level <= 2) {
-        blocks.push({ type: "heading_2", heading_2: { rich_text: richText } });
+        push({ type: "heading_2", heading_2: { rich_text: richText } });
       } else {
-        blocks.push({ type: "heading_3", heading_3: { rich_text: richText } });
+        push({ type: "heading_3", heading_3: { rich_text: richText } });
       }
       index++;
       continue;
     }
 
-    const bulletMatch = line.match(/^[-*•]\s+(.*)$/);
-    if (bulletMatch) {
-      blocks.push({
-        type: "bulleted_list_item",
-        bulleted_list_item: { rich_text: buildRichText(bulletMatch[1]) },
-      });
-      index++;
+    // A run of list lines -> nested list blocks. Indentation is read from the
+    // raw lines (parseListLine), so sub-bullets become children of their
+    // parent item instead of more top-level bullets.
+    if (parseListLine(lines[index])) {
+      const items: ListLine[] = [];
+      while (index < lines.length) {
+        const item = parseListLine(lines[index]);
+        if (!item) break;
+        items.push(item);
+        index++;
+      }
+      blocks.push(...buildListTree(items).map(listNodeToBlock));
       continue;
     }
 
@@ -312,7 +354,7 @@ function convertLectureNoteToBlocks(markdown: string, depth = 0): BlockObjectReq
     // plain reference instead of broken markdown syntax.
     const slideMatch = line.match(/^!\[[^\]]*\]\(slide_(\d+)\)$/);
     if (slideMatch) {
-      blocks.push({
+      push({
         type: "paragraph",
         paragraph: { rich_text: buildRichText(`🖼️ 슬라이드 ${slideMatch[1]} (이미지는 앱에서 확인해주세요)`) },
       });
@@ -326,7 +368,7 @@ function convertLectureNoteToBlocks(markdown: string, depth = 0): BlockObjectReq
     // which Notion's `image` block can embed directly via `external.url`.
     const imageMatch = line.match(/^!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)$/);
     if (imageMatch) {
-      blocks.push({
+      push({
         type: "image",
         image: { type: "external", external: { url: imageMatch[2] } },
       });
@@ -336,30 +378,19 @@ function convertLectureNoteToBlocks(markdown: string, depth = 0): BlockObjectReq
 
     const calloutEmoji = detectCalloutEmoji(line);
     if (calloutEmoji) {
-      blocks.push({
-        type: "callout",
-        callout: {
-          icon: { type: "emoji", emoji: calloutEmoji },
-          color: CALLOUT_COLOR_BY_EMOJI[calloutEmoji],
-          rich_text: buildRichText(
-            stripCalloutEmoji(line, calloutEmoji),
-            BOLD_CALLOUT_EMOJIS.has(calloutEmoji),
-            CALLOUT_COLOR_BY_EMOJI[calloutEmoji] === "yellow_background" ? "orange_background" : "yellow_background",
-          ),
-        },
-      });
+      push(emojiCalloutBlock(line, calloutEmoji));
       index++;
       continue;
     }
 
     if (matchPlainQuote(line) !== null) {
       const { items, next } = readMatchingRun(lines, index, matchPlainQuote);
-      blocks.push({ type: "quote", quote: { rich_text: buildRichText(items.join("\n")) } });
+      push({ type: "quote", quote: { rich_text: buildRichText(items.join("\n")) } });
       index = next;
       continue;
     }
 
-    blocks.push({ type: "paragraph", paragraph: { rich_text: buildRichText(line) } });
+    push({ type: "paragraph", paragraph: { rich_text: buildRichText(line) } });
     index++;
   }
 
@@ -392,7 +423,7 @@ function buildChecklistBlocks(checklist: IncomingChecklistItem[]): BlockObjectRe
   return [{ type: "heading_3", heading_3: { rich_text: buildRichText("✅ 체크리스트") } }, ...items];
 }
 
-function buildTranscriptParagraphs(transcript: IncomingTranscriptSegment[]): NotionParagraphBlock[] {
+function buildTranscriptParagraphs(transcript: IncomingTranscriptSegment[]): BlockObjectRequest[] {
   const segments = transcript.filter(
     (segment): segment is { startMs: number; text: string } =>
       typeof segment.text === "string" && segment.text.trim().length > 0,
@@ -400,7 +431,7 @@ function buildTranscriptParagraphs(transcript: IncomingTranscriptSegment[]): Not
   if (segments.length === 0) return [];
 
   const capped = segments.slice(0, MAX_TRANSCRIPT_PARAGRAPHS);
-  const paragraphs: NotionParagraphBlock[] = capped.map((segment) => {
+  const paragraphs: BlockObjectRequest[] = capped.map((segment) => {
     const timestamp = typeof segment.startMs === "number" ? `[${formatDuration(segment.startMs)}] ` : "";
     return {
       type: "paragraph",
@@ -416,10 +447,73 @@ function buildTranscriptParagraphs(transcript: IncomingTranscriptSegment[]): Not
   return paragraphs;
 }
 
-async function appendInBatches(notion: Client, blockId: string, children: BlockObjectRequest[]): Promise<void> {
-  for (const batch of chunkArray(children, BLOCKS_PER_REQUEST)) {
-    if (batch.length === 0) continue;
-    await notion.blocks.children.append({ block_id: blockId, children: batch });
+// Notion takes a block's children inside its type-specific object, e.g.
+// { type: "bulleted_list_item", bulleted_list_item: { rich_text, children } }.
+function withChildren(block: BlockObjectRequest, children: BlockObjectRequest[]): BlockObjectRequest {
+  if (children.length === 0 || !block.type) return block;
+  const content = (block as Record<string, unknown>)[block.type] as Record<string, unknown>;
+  return { ...block, [block.type]: { ...content, children } } as BlockObjectRequest;
+}
+
+// Ids of a block's first `count` children, in order.
+async function listChildIds(notion: Client, blockId: string, count: number): Promise<string[]> {
+  const ids: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await notion.blocks.children.list({ block_id: blockId, page_size: 100, start_cursor: cursor });
+    ids.push(...page.results.map((result) => result.id));
+    cursor = page.has_more && page.next_cursor ? page.next_cursor : undefined;
+  } while (cursor && ids.length < count);
+  return ids.slice(0, count);
+}
+
+// Appends a block tree under parentId, keeping every block's children nested
+// inside it. Each request carries a batch of blocks with their direct
+// children inline; anything deeper is appended afterwards to the created
+// child blocks (whose ids come from listing the parent's children), so the
+// nesting depth is unlimited. A typical note — bullets with one level of
+// sub-bullets — still goes out in the same few requests as before.
+async function appendBlockTree(notion: Client, parentId: string, nodes: BlockNode[]): Promise<void> {
+  let start = 0;
+  while (start < nodes.length) {
+    const batch: BlockNode[] = [];
+    let elements = 0;
+    while (start + batch.length < nodes.length && batch.length < BLOCKS_PER_REQUEST) {
+      const node = nodes[start + batch.length];
+      const size = 1 + Math.min(node.children.length, BLOCKS_PER_REQUEST);
+      if (batch.length > 0 && elements + size > MAX_BLOCK_ELEMENTS_PER_REQUEST) break;
+      batch.push(node);
+      elements += size;
+    }
+    start += batch.length;
+
+    const response = await notion.blocks.children.append({
+      block_id: parentId,
+      children: batch.map((node) =>
+        withChildren(
+          node.block,
+          node.children.slice(0, BLOCKS_PER_REQUEST).map((child) => child.block),
+        ),
+      ),
+    });
+
+    for (const [position, node] of batch.entries()) {
+      if (node.children.length === 0) continue;
+      const blockId = response.results[position]?.id;
+      if (!blockId) throw new Error("노션에 추가된 블록을 확인하지 못해 하위 항목을 넣을 수 없습니다.");
+      const inline = node.children.slice(0, BLOCKS_PER_REQUEST);
+      if (inline.some((child) => child.children.length > 0)) {
+        const childIds = await listChildIds(notion, blockId, inline.length);
+        for (const [childPosition, child] of inline.entries()) {
+          if (child.children.length > 0 && childIds[childPosition]) {
+            await appendBlockTree(notion, childIds[childPosition], child.children);
+          }
+        }
+      }
+      if (node.children.length > BLOCKS_PER_REQUEST) {
+        await appendBlockTree(notion, blockId, node.children.slice(BLOCKS_PER_REQUEST));
+      }
+    }
   }
 }
 
@@ -488,45 +582,30 @@ export async function POST(request: Request) {
   try {
     const lectureNoteBlocks = lectureNote.trim()
       ? convertLectureNoteToBlocks(lectureNote)
-      : [{ type: "paragraph" as const, paragraph: { rich_text: buildRichText("상세 강의노트가 없습니다.") } }];
+      : [leaf({ type: "paragraph", paragraph: { rich_text: buildRichText("상세 강의노트가 없습니다.") } })];
 
     // A divider + heading marks where this export starts, since we're
     // appending into a page the user already owns (and may export multiple
     // lectures into over time) rather than creating a fresh page for it.
-    const bodyBlocks: BlockObjectRequest[] = [
-      { type: "divider", divider: {} },
-      { type: "heading_2", heading_2: { rich_text: buildRichText(`📚 ${title}`) } },
-      buildSummaryCalloutBlock(summary),
-      { type: "heading_3", heading_3: { rich_text: buildRichText("📖 상세 강의노트") } },
+    const bodyBlocks: BlockNode[] = [
+      leaf({ type: "divider", divider: {} }),
+      leaf({ type: "heading_2", heading_2: { rich_text: buildRichText(`📚 ${title}`) } }),
+      leaf(buildSummaryCalloutBlock(summary)),
+      leaf({ type: "heading_3", heading_3: { rich_text: buildRichText("📖 상세 강의노트") } }),
       ...lectureNoteBlocks,
-      ...buildChecklistBlocks(checklist),
+      ...buildChecklistBlocks(checklist).map(leaf),
     ];
+    const transcriptParagraphs = buildTranscriptParagraphs(transcript);
+    if (transcriptParagraphs.length > 0) {
+      bodyBlocks.push({
+        block: { type: "toggle", toggle: { rich_text: buildRichText("🎙️ 전체 스크립트 전문", true) } },
+        children: transcriptParagraphs.map(leaf),
+      });
+    }
 
     // Append directly into the target page's own body (blocks.children.append
     // accepts a page ID as block_id — a page is itself a block in the API).
-    await appendInBatches(notion, targetPageId, bodyBlocks);
-
-    const transcriptParagraphs = buildTranscriptParagraphs(transcript);
-    if (transcriptParagraphs.length > 0) {
-      const toggleFirstBatch = transcriptParagraphs.slice(0, BLOCKS_PER_REQUEST);
-      const toggleRestBatches = transcriptParagraphs.slice(BLOCKS_PER_REQUEST);
-      const appended = await notion.blocks.children.append({
-        block_id: targetPageId,
-        children: [
-          {
-            type: "toggle",
-            toggle: {
-              rich_text: buildRichText("🎙️ 전체 스크립트 전문", true),
-              children: toggleFirstBatch,
-            },
-          },
-        ],
-      });
-      const toggleBlockId = appended.results[0]?.id;
-      if (toggleBlockId && toggleRestBatches.length > 0) {
-        await appendInBatches(notion, toggleBlockId, toggleRestBatches);
-      }
-    }
+    await appendBlockTree(notion, targetPageId, bodyBlocks);
 
     const page = await notion.pages.retrieve({ page_id: targetPageId });
     const url =

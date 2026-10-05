@@ -11,6 +11,7 @@ import { buildDeepDiveImageProxyUrl, uploadFileToBlob } from "@/lib/blobUpload";
 import { copyToClipboard, downloadTextFile } from "@/lib/export";
 import { describeBlockedChunks } from "@/lib/geminiMessages";
 import { stripMarkTags } from "@/lib/inlineMarkdown";
+import { toNotionPasteMarkdown } from "@/lib/noteBlocks";
 import { renderMarkdown } from "@/lib/markdown";
 import { buildSlideThumbnails } from "@/lib/pdfSlides";
 import type { AiResult, ChecklistItem, DraftBlock, TranscriptSegment } from "@/lib/types";
@@ -36,12 +37,15 @@ type ReviewPanelProps = {
   slideImages?: Map<number, string>;
 };
 
+// The raw markdown, with list indentation normalized to 4 spaces per level —
+// Notion (the usual paste target) flattens 2-space nested bullets, and
+// doesn't treat the summary's "•" bullets as a list at all.
 function buildSummaryExportContent(aiResult: AiResult) {
-  return ["# 강의 요약", "", aiResult.summary || "요약 내용이 없습니다."].join("\n");
+  return toNotionPasteMarkdown(["# 강의 요약", "", aiResult.summary || "요약 내용이 없습니다."].join("\n"));
 }
 
 function buildLectureNoteExportContent(aiResult: AiResult) {
-  return ["# 상세 강의노트", "", aiResult.lectureNote || "상세 강의노트가 없습니다."].join("\n");
+  return toNotionPasteMarkdown(["# 상세 강의노트", "", aiResult.lectureNote || "상세 강의노트가 없습니다."].join("\n"));
 }
 
 // The deep-dive endpoint is strictly grounded in the recording and slides
