@@ -44,6 +44,8 @@ const PDF_FONT_FAMILY = "'Apple SD Gothic Neo', 'Malgun Gothic', -apple-system, 
 const BODY_STYLE = "font-size:12.5px;color:#374151;line-height:1.6;";
 const AVOID_BREAK_STYLE = "break-inside:avoid;page-break-inside:avoid;";
 const AVOID_BREAK_ATTR = 'data-avoid-break="true"';
+// A heading: a page never ends right after it (see measureAvoidRanges).
+const KEEP_WITH_NEXT_ATTR = 'data-keep-with-next="true"';
 
 function escapeHtml(text: string): string {
   return text
@@ -64,16 +66,41 @@ function detectCallout(text: string): CalloutStyle | undefined {
 }
 
 // Same yellow as the on-screen <mark> (lib/markdown.tsx), as a hex literal.
-const PDF_HIGHLIGHT_STYLE = "background:#fef08a;color:#111827;padding:0 2px;border-radius:2px;";
+// The box-decoration-break pair is what a real browser needs for a wrapped
+// highlight; html2canvas ignores it (see highlightHtml for what it needs).
+const PDF_HIGHLIGHT_STYLE =
+  "background:#fef08a;color:#111827;display:inline;-webkit-box-decoration-break:clone;box-decoration-break:clone;";
+// A single word of a highlight: never wraps internally, and keep-all stops
+// Korean from breaking between syllables inside it.
+const PDF_HIGHLIGHT_WORD_STYLE = `${PDF_HIGHLIGHT_STYLE}white-space:nowrap;word-break:keep-all;`;
+
+// html2canvas paints an inline element's background as ONE rectangle around
+// all of its line boxes, so a <mark> that wraps onto a second line got a
+// yellow band running from the start of the first line to the end of the
+// last one, across the full width. Each word (and each gap between words)
+// gets its own span instead: a span that can't wrap sits on one line, so its
+// rectangle is exactly its text. Line breaks still happen at the gaps.
+function highlightHtml(parts: { text: string; bold: boolean }[]): string {
+  const spans = parts.flatMap((part) =>
+    part.text
+      .split(/(\s+)/)
+      .filter((token) => token.length > 0)
+      .map((token) => {
+        const content = part.bold ? `<strong>${escapeHtml(token)}</strong>` : escapeHtml(token);
+        const style = /^\s+$/.test(token) ? PDF_HIGHLIGHT_STYLE : PDF_HIGHLIGHT_WORD_STYLE;
+        return `<span style="${style}">${content}</span>`;
+      }),
+  );
+  return `<mark style="background:transparent;color:inherit;">${spans.join("")}</mark>`;
+}
 
 function renderInlineHtml(text: string): string {
   return tokenizeInline(text)
-    .map((group) => {
-      const inner = group.parts
-        .map((part) => (part.bold ? `<strong>${escapeHtml(part.text)}</strong>` : escapeHtml(part.text)))
-        .join("");
-      return group.highlight ? `<mark style="${PDF_HIGHLIGHT_STYLE}">${inner}</mark>` : inner;
-    })
+    .map((group) =>
+      group.highlight
+        ? highlightHtml(group.parts)
+        : group.parts.map((part) => (part.bold ? `<strong>${escapeHtml(part.text)}</strong>` : escapeHtml(part.text))).join(""),
+    )
     .join("");
 }
 
@@ -237,7 +264,7 @@ function renderMarkdownToHtml(markdown: string, slideImages?: Map<number, string
     if (headingMatch) {
       const level = headingMatch[1].length;
       blocks.push(
-        `<p style="${headingStyle(level)}margin:${index === 0 ? "0 0 4px" : "12px 0 4px"};">${renderInlineHtml(headingMatch[2])}</p>`,
+        `<p ${KEEP_WITH_NEXT_ATTR} style="${headingStyle(level)}margin:${index === 0 ? "0 0 4px" : "12px 0 4px"};">${renderInlineHtml(headingMatch[2])}</p>`,
       );
       index++;
       continue;
@@ -390,38 +417,70 @@ const MARGIN_MM = 15;
 const USABLE_WIDTH_MM = PAGE_WIDTH_MM - MARGIN_MM * 2;
 const USABLE_HEIGHT_MM = PAGE_HEIGHT_MM - MARGIN_MM * 2;
 
-type AvoidRange = { top: number; bottom: number };
+export type AvoidRange = { top: number; bottom: number };
 
-// Picks each page's end so it never lands inside a callout box or table
-// (falls back to a plain cut only if a single block is taller than a page),
-// and additionally forces a break at each `hardBreaks` offset (a selected
-// section's start) so every chosen section always begins on a fresh page —
-// this is what actually implements "page-break-before" against a flattened
-// single canvas (there's no real DOM to apply that CSS property to once
-// html2canvas has rasterized it).
-function computePageSlices(
-  canvasHeightPx: number,
-  usableHeightPx: number,
-  avoidRanges: AvoidRange[],
-  hardBreaks: number[] = [],
-) {
+// The PDF is one tall canvas cut into pages, so "page-break-inside: avoid"
+// has to be done here: a page ends just above any block it would otherwise
+// slice through. Only blocks up to this fraction of a page are kept whole —
+// a long table or callout is cut between its rows/lines instead of being
+// pushed whole to the next page, which is what used to leave pages mostly
+// blank. That also bounds the empty space at the bottom of any page.
+const MAX_UNBROKEN_FRACTION = 0.3;
+
+// Where each page ends. No forced breaks: selected sections simply follow
+// one another, separated by a divider (see exportSectionsToPdf).
+export function computePageSlices(canvasHeightPx: number, usableHeightPx: number, avoidRanges: AvoidRange[]) {
+  const maxUnbroken = usableHeightPx * MAX_UNBROKEN_FRACTION;
+  const ranges = avoidRanges.filter((range) => range.bottom - range.top <= maxUnbroken);
   const slices: Array<{ sy: number; sh: number }> = [];
   let y = 0;
   while (y < canvasHeightPx - 0.5) {
     let end = Math.min(y + usableHeightPx, canvasHeightPx);
-    const nextHardBreak = hardBreaks.find((offset) => offset > y + 0.5 && offset < end);
-    if (nextHardBreak !== undefined) {
-      end = nextHardBreak;
-    }
-    for (const range of avoidRanges) {
-      if (range.top > y && range.top < end && range.bottom > end) {
-        end = range.top;
+    if (end < canvasHeightPx) {
+      // Never pulled up past this, so a page is always at least
+      // (1 - MAX_UNBROKEN_FRACTION) full.
+      const minEnd = y + usableHeightPx * (1 - MAX_UNBROKEN_FRACTION);
+      // Repeat until stable: moving the end up can land it inside another
+      // (enclosing) block, which then needs the same treatment.
+      let moved = true;
+      while (moved) {
+        moved = false;
+        for (const range of ranges) {
+          if (range.top >= minEnd && range.top < end && range.bottom > end) {
+            end = range.top;
+            moved = true;
+          }
+        }
       }
     }
     slices.push({ sy: y, sh: end - y });
     y = end;
   }
   return slices;
+}
+
+// The smallest units a page break must not run through — a line of text
+// sliced in half is unreadable — plus the marked boxes (callouts, tables,
+// formulas, quotes, images), which computePageSlices keeps whole only when
+// they're short.
+const MIN_BLOCK_SELECTOR = "p, li, tr, img, pre, [data-avoid-break]";
+// How much of what follows a heading has to stay on its page with it.
+const KEEP_WITH_NEXT_PX = 60;
+
+function measureAvoidRanges(root: HTMLElement, scale: number): AvoidRange[] {
+  const rootTop = root.getBoundingClientRect().top;
+  const toRange = (el: Element): AvoidRange => {
+    const rect = el.getBoundingClientRect();
+    return { top: (rect.top - rootTop) * scale, bottom: (rect.bottom - rootTop) * scale };
+  };
+  const ranges = Array.from(root.querySelectorAll(MIN_BLOCK_SELECTOR)).map(toRange);
+  for (const heading of Array.from(root.querySelectorAll("[data-keep-with-next]"))) {
+    const next = heading.nextElementSibling;
+    if (!next) continue;
+    const own = toRange(heading);
+    ranges.push({ top: own.top, bottom: Math.min(toRange(next).bottom, own.bottom + KEEP_WITH_NEXT_PX * scale) });
+  }
+  return ranges;
 }
 
 export type PdfSectionId = "summary" | "lectureNote" | "transcript" | "checklist";
@@ -460,8 +519,8 @@ function renderSectionBodyHtml(sectionId: PdfSectionId, data: PdfExportData): st
 
 // Renders whichever sections the user picked (PdfExportModal), each from its
 // full, untouched source — same data-preservation principle as copy/.txt/.md
-// download and Notion export. Every section after the first is marked with
-// data-section-start so computePageSlices forces it onto a fresh page.
+// download and Notion export. Sections run on continuously (no page break
+// between them), each after the first set off by a divider and spacing.
 // Next.js's webpack build splits html2canvas/jspdf into separate chunks
 // fetched on demand (see the dynamic import below, which also keeps them
 // out of the server bundle). That fetch can fail — a stale service worker
@@ -519,15 +578,10 @@ export async function exportSectionsToPdf(sections: PdfSectionId[], data: PdfExp
 
     const sectionsHtml = sections
       .map((sectionId, index) => {
-        const isFirst = index === 0;
-        const heading = `<p style="font-size:16px;font-weight:700;color:${PDF_TEXT_COLOR};margin:0 0 10px;">${escapeHtml(SECTION_TITLES[sectionId])}</p>`;
+        const divider = index === 0 ? "" : '<hr style="border:0;border-top:2px solid #d1d5db;margin:28px 0 20px;" />';
+        const heading = `<p ${KEEP_WITH_NEXT_ATTR} style="font-size:16px;font-weight:700;color:${PDF_TEXT_COLOR};margin:0 0 10px;">${escapeHtml(SECTION_TITLES[sectionId])}</p>`;
         const body = renderSectionBodyHtml(sectionId, data);
-        // A visible divider too (not just the forced page break) — still
-        // useful context if a page ever renders both sides of a boundary
-        // (e.g. a future zoomed/print-preview view of the raw HTML).
-        const wrapperStyle = isFirst ? "" : "margin-top:18px;padding-top:14px;border-top:2px solid #e5e7eb;";
-        const marker = isFirst ? "" : ' data-section-start="true"';
-        return `<div${marker} style="${wrapperStyle}">${heading}${body}</div>`;
+        return `${divider}<div>${heading}${body}</div>`;
       })
       .join("");
 
@@ -556,18 +610,7 @@ export async function exportSectionsToPdf(sections: PdfSectionId[], data: PdfExp
       ),
     );
 
-    const rootRect = printRoot.getBoundingClientRect();
-    const avoidRanges: AvoidRange[] = Array.from(printRoot.querySelectorAll("[data-avoid-break]")).map((el) => {
-      const rect = el.getBoundingClientRect();
-      return {
-        top: (rect.top - rootRect.top) * CAPTURE_SCALE,
-        bottom: (rect.bottom - rootRect.top) * CAPTURE_SCALE,
-      };
-    });
-    const hardBreaks: number[] = Array.from(printRoot.querySelectorAll("[data-section-start]")).map((el) => {
-      const rect = el.getBoundingClientRect();
-      return (rect.top - rootRect.top) * CAPTURE_SCALE;
-    });
+    const avoidRanges = measureAvoidRanges(printRoot, CAPTURE_SCALE);
 
     // Captured directly from the still-isolated iframe element — never
     // reparented into the app's document, unlike html2pdf.js's own flow.
@@ -579,7 +622,7 @@ export async function exportSectionsToPdf(sections: PdfSectionId[], data: PdfExp
 
     const mmPerCanvasPx = USABLE_WIDTH_MM / canvas.width;
     const usableHeightPx = USABLE_HEIGHT_MM / mmPerCanvasPx;
-    const slices = computePageSlices(canvas.height, usableHeightPx, avoidRanges, hardBreaks);
+    const slices = computePageSlices(canvas.height, usableHeightPx, avoidRanges);
 
     const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
     const pageCanvas = document.createElement("canvas");
