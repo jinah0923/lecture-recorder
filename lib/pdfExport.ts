@@ -1,6 +1,7 @@
 "use client";
 
 import { tokenizeInline } from "@/lib/inlineMarkdown";
+import { isCodeFence, matchEquationLine, matchQuoteLine, readCodeFence, readMatchingRun } from "@/lib/noteBlocks";
 import type { ChecklistItem, TranscriptSegment } from "@/lib/types";
 
 // html2canvas cannot parse modern CSS color functions (e.g. Tailwind v4's
@@ -75,6 +76,25 @@ function renderInlineHtml(text: string): string {
     .join("");
 }
 
+// A plain "> " quote line — anything that isn't an emoji callout or a
+// formula line (mirrors lib/markdown.tsx).
+function matchPlainQuote(line: string): string | null {
+  if (detectCallout(line) || matchEquationLine(line) !== null) return null;
+  return matchQuoteLine(line);
+}
+
+// Formula block — same tinted, centered, bold panel as on screen
+// (lib/markdown.tsx), with hex colors since html2canvas can't read oklch.
+function renderEquationHtml(equations: string[]): string {
+  const rows = equations
+    .map(
+      (equation) =>
+        `<p style="margin:0;font-size:13.5px;font-weight:700;color:${PDF_TEXT_COLOR};text-align:center;line-height:1.6;word-break:keep-all;">${renderInlineHtml(equation)}</p>`,
+    )
+    .join("");
+  return `<div ${AVOID_BREAK_ATTR} style="${AVOID_BREAK_STYLE}margin:8px 0;padding:10px 14px;border:1px solid #e2e8f0;border-radius:8px;background:#f1f5f9;display:flex;flex-direction:column;gap:4px;">${rows}</div>`;
+}
+
 function headingStyle(level: number): string {
   if (level === 1) return `font-size:16px;font-weight:700;color:${PDF_TEXT_COLOR};`;
   if (level === 2) return `font-size:14px;font-weight:700;color:${PDF_TEXT_COLOR};`;
@@ -112,9 +132,11 @@ function renderMarkdownToHtml(markdown: string, slideImages?: Map<number, string
     const items = listBuffer;
     listBuffer = [];
 
-    if (items.some((item) => detectCallout(item))) {
+    if (items.some((item) => detectCallout(item) || matchEquationLine(item) !== null)) {
       const itemsHtml = items
         .map((item) => {
+          const equation = matchEquationLine(item);
+          if (equation !== null) return renderEquationHtml([equation]);
           const callout = detectCallout(item);
           if (callout) {
             return `<div ${AVOID_BREAK_ATTR} style="${AVOID_BREAK_STYLE}border:${callout.borderWidth ?? "1px"} solid ${callout.border};border-radius:8px;padding:8px 12px;font-size:12.5px;background:${callout.bg};color:${callout.text};${callout.bold ? "font-weight:600;" : ""}">${renderInlineHtml(item)}</div>`;
@@ -247,6 +269,23 @@ function renderMarkdownToHtml(markdown: string, slideImages?: Map<number, string
       continue;
     }
 
+    if (isCodeFence(line)) {
+      flushList();
+      const { code, next } = readCodeFence(lines, index);
+      blocks.push(
+        `<pre ${AVOID_BREAK_ATTR} style="${AVOID_BREAK_STYLE}margin:8px 0;padding:10px 14px;border:1px solid #e2e8f0;border-radius:8px;background:#f1f5f9;font-family:Consolas,Menlo,monospace;font-size:12px;font-weight:600;color:#1f2937;white-space:pre-wrap;word-break:break-word;">${escapeHtml(code)}</pre>`,
+      );
+      index = next;
+      continue;
+    }
+
+    if (matchEquationLine(line) !== null) {
+      const { items, next } = readMatchingRun(lines, index, matchEquationLine);
+      blocks.push(renderEquationHtml(items));
+      index = next;
+      continue;
+    }
+
     const callout = detectCallout(line);
     if (callout) {
       // Greedily consume immediately-following plain lines into the same
@@ -261,6 +300,7 @@ function renderMarkdownToHtml(markdown: string, slideImages?: Map<number, string
         if (nextLine.startsWith("|")) break;
         if (SLIDE_IMAGE_PATTERN.test(nextLine) || IMAGE_PATTERN.test(nextLine)) break;
         if (detectCallout(nextLine)) break;
+        if (matchEquationLine(nextLine) !== null || isCodeFence(nextLine)) break;
         groupLines.push(stripBlockquotePrefix(nextLine));
         cursor++;
       }
@@ -269,6 +309,16 @@ function renderMarkdownToHtml(markdown: string, slideImages?: Map<number, string
         `<div ${AVOID_BREAK_ATTR} style="${AVOID_BREAK_STYLE}border:${callout.borderWidth ?? "1px"} solid ${callout.border};border-radius:8px;padding:8px 12px;margin:6px 0;display:flex;flex-direction:column;gap:4px;font-size:12.5px;background:${callout.bg};color:${callout.text};${callout.bold ? "font-weight:600;" : ""}">${groupHtml}</div>`,
       );
       index = cursor;
+      continue;
+    }
+
+    if (matchPlainQuote(line) !== null) {
+      const { items, next } = readMatchingRun(lines, index, matchPlainQuote);
+      const quoteHtml = items.map((item) => `<p style="margin:0;">${renderInlineHtml(item)}</p>`).join("");
+      blocks.push(
+        `<div ${AVOID_BREAK_ATTR} style="${AVOID_BREAK_STYLE}${BODY_STYLE}margin:6px 0;padding:8px 14px;border-left:4px solid #cbd5e1;border-radius:0 8px 8px 0;background:#f8fafc;display:flex;flex-direction:column;gap:4px;">${quoteHtml}</div>`,
+      );
+      index = next;
       continue;
     }
 

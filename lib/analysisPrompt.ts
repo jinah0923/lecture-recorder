@@ -3,7 +3,7 @@
 // (OpenAI) — so a note reads the same whichever engine the user picked.
 
 import { BLOCKED_CHUNK_MARKER } from "@/lib/geminiMessages";
-import { VERBATIM_TERMINOLOGY_RULE } from "@/lib/promptRules";
+import { EQUATION_FORMAT_RULE, VERBATIM_TERMINOLOGY_RULE } from "@/lib/promptRules";
 
 // Shared by both workers' system instructions — Gemini otherwise tends to
 // reach for \rightarrow / $...$ style LaTeX for arrows and formulas, which
@@ -19,7 +19,7 @@ export const ANALYSIS_FIELD_DESCRIPTIONS = {
   summary:
     "녹음 음성만을 기반으로 한 핵심 요약 3~5개를 '• '로 시작하는 글머리 기호 리스트로 작성 (마크다운, 줄글 문단 형태 금지)",
   lectureNote:
-    "강의 음성과 참고자료를 통합해 원본의 정보량을 100% 보존한 무손실 상세 강의노트 (마크다운, 요약 금지). 번호가 매겨진 대주제(## 1. ...) 구조, 본문은 일반 텍스트/불릿 기본, 강조가 필요한 항목에만 선택적으로 '> 🚨'/'> 🔥'/'> 🗣️' 콜아웃 사용. 교수가 강조한 문장·자료에서 시각적으로 강조된 텍스트는 빠짐없이 포함하고 <mark>...</mark>로 형광펜 표시",
+    "강의 음성과 참고자료를 통합해 원본의 정보량을 100% 보존한 무손실 상세 강의노트 (마크다운, 요약 금지). 번호가 매겨진 대주제(## 1. ...) 구조, 본문은 일반 텍스트/불릿 기본, 강조가 필요한 항목에만 선택적으로 '> 🚨'/'> 🔥'/'> 🗣️' 콜아웃 사용. 교수가 강조한 문장·자료에서 시각적으로 강조된 텍스트는 빠짐없이 포함하고 <mark>...</mark>로 형광펜 표시. 수식·등식은 줄바꿈 없는 독립된 `> 🧮 ` 한 줄로 작성",
   checklist: "학습자가 실천해야 할 과제/복습 체크리스트 문장 목록",
 };
 
@@ -128,7 +128,8 @@ export function buildAnalysisPrompt(
       "  > 🚨 **[시험 출제 100%]** 교수님 강조 내용: (실제로 언급된 내용을 그대로 서술)",
     "- [선택적 강조, 중첩 금지] 모든 문장을 콜아웃 박스로 감싸지 마세요(도배 금지). 아래 세 경우에만 해당 문장 앞에 " +
       '"> " 를 붙인 인용(blockquote) 콜아웃으로 선택적으로 강조하세요. 콜아웃 박스 안에 또 다른 "> " 인용문을 ' +
-      "중첩해서 넣지 마세요 — 콜아웃은 항상 1단계로만 작성합니다.",
+      "중첩해서 넣지 마세요 — 콜아웃은 항상 1단계로만 작성합니다. (수식·등식을 쓰는 `> 🧮 ` 줄은 콜아웃이 아니라 아래 " +
+      "[수식·등식 전용 블록] 규칙을 따르는 별도 형식입니다.)",
     "  > 🚨 [시험 출제 확정]: 바로 위 [시험 출제 신호 감지] 규칙에 해당하는 내용 (형식은 그 규칙의 예시를 그대로 따르세요)",
     "  > 🔥 [핵심 강조]: 교수가 강조했지만 출제 여부를 직접 언급하지는 않은 중요 개념 — 🚨 항목과 중복해서 표시하지 마세요",
     "  > 🗣️ [교수님 코멘트/사례]: 맥락 이해를 돕는 교수님의 예시나 인상적인 멘트",
@@ -149,6 +150,7 @@ export function buildAnalysisPrompt(
       "\"밑줄 그어라\"라고만 한 문장이나 자료에서 시각적으로 강조된 문장은 🚨를 붙이지 말고 `<mark>`만 쓰세요.\n" +
       "  남용 금지: 교수나 자료가 실제로 강조한 내용에만 쓰세요. 당신이 중요하다고 판단했을 뿐 실제로 강조되지 " +
       "않은 문장에는 쓰지 마세요. summary와 checklist에는 `<mark>`를 쓰지 마세요.",
+    `- ${EQUATION_FORMAT_RULE}`,
     "- [비교 표 필수] 성적 평가 비율, 과제 제출 일정, AI 활용 가이드라인처럼 서로 비교 가능한 항목이 3개 이상 " +
       "나열되는 경우, 절대 줄글 문단이나 글머리 기호 리스트로 나열하지 말고 반드시 Markdown 표(\"| 항목 | 내용 |\" " +
       "형식, 구분선 행 포함)로 작성하세요.",

@@ -347,7 +347,7 @@ export function ReviewPanel({
       <section className="rounded-2xl border border-slate-200 bg-slate-50 p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">AI 요약본</h2>
-          <div className="flex gap-1.5">
+          <div className="flex flex-wrap gap-1.5">
             <button
               type="button"
               onClick={handleCopySummary}
@@ -381,7 +381,7 @@ export function ReviewPanel({
       <section className="rounded-2xl border border-slate-200 bg-slate-50 p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">📖 상세 강의노트</h2>
-          <div className="flex gap-1.5">
+          <div className="flex flex-wrap gap-1.5">
             <button
               type="button"
               onClick={handleCopyNote}
@@ -529,7 +529,7 @@ export function ReviewPanel({
               onPaste={handleQuestionPaste}
               placeholder="[누락 내용 추가 / 심화 개념 / 구조식 요청] 예: 전사 과정 중 스플라이싱 내용이 빠졌어, 표 형태로 정리해서 추가해 줘."
               disabled={!aiResult.lectureNote || isEditingNote}
-              className="flex-1 rounded-lg border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-900 outline-none focus:border-indigo-300 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+              className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-900 outline-none focus:border-indigo-300 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
             />
             <button
               type="button"

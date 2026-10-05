@@ -24,3 +24,23 @@ export const VERBATIM_TERMINOLOGY_RULE = [
   "- 예외: STT가 명백히 잘못 알아들은 오인식(발음이 비슷한 엉뚱한 단어)을 키워드 목록이나 강의자료를 근거로 교수가 의도한 " +
     "원래 용어로 바로잡는 것은 허용됩니다 — 이것은 교정이지 유의어 대체가 아닙니다.",
 ].join("\n");
+
+// Formulas used to come out split across lines or bullets with half-bolded
+// terms ("**자산** = 부채 +" / "* 자본**"), leaving unclosed ** that broke the
+// rendering. One canonical form instead: each formula on its own unbroken
+// "> 🧮 " line, which every renderer shows as a standalone formula block
+// (lib/noteBlocks.ts). Shared with the deep-dive writer, whose blocks merge
+// into the same note.
+export const EQUATION_FORMAT_RULE = [
+  "[수식·등식 전용 블록 — 마크다운 깨짐 방지, 최우선 서식 규칙] 회계 등식, 공식, 계산식처럼 =, +, −, ×, ÷ 등으로 이어지는 " +
+    "수식/등식(예: 자산 = 부채 + 자본)은 본문 문장이나 글머리 기호 안에 섞어 쓰지 말고, 앞뒤를 빈 줄로 띄운 독립된 한 줄 맨 " +
+    "앞에 `> 🧮 `를 붙여 작성하세요. 예:\n\n> 🧮 자산 = 부채 + 자본\n",
+  "- 하나의 수식은 반드시 끊기지 않는 한 줄로 쓰세요. 수식 중간에서 줄을 바꾸거나, 수식의 항을 글머리 기호(-, *)로 " +
+    "쪼개 여러 줄에 나눠 쓰는 것은 금지입니다.",
+  "- 수식 줄 안에서는 `**` 볼드를 쓰지 마세요 — 수식 블록은 화면에서 이미 굵게 강조되어 표시됩니다. 특정 단어만 볼드로 " +
+    "감싸려다 `**`의 짝이 맞지 않게 되는 것이 서식이 깨지는 주된 원인입니다.",
+  "- 교수가 강조한 수식이라면 수식 전체를 `<mark>`로 감쌀 수 있습니다: `> 🧮 <mark>자산 = 부채 + 자본</mark>`.",
+  "- 여러 단계로 전개되는 식은 단계마다 `> 🧮 ` 줄을 하나씩 연달아 쓰세요. 수식의 의미·각 항의 설명은 수식 줄 바로 " +
+    "아래에 별도의 문장이나 글머리 기호로 쓰세요(설명을 수식 줄 안에 붙이지 말 것).",
+  "- 수식 기호는 LaTeX가 아닌 일반 텍스트 기호(=, +, −, ×, ÷, →)만 사용하세요.",
+].join("\n");

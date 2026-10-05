@@ -4,6 +4,7 @@ import type { BlockObjectRequest } from "@notionhq/client";
 import { extractNotionId } from "@/lib/notionUtils";
 import { formatDuration } from "@/lib/format";
 import { tokenizeInline } from "@/lib/inlineMarkdown";
+import { EQUATION_MARKER, isCodeFence, matchEquationLine, matchQuoteLine, readCodeFence, readMatchingRun } from "@/lib/noteBlocks";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -50,6 +51,7 @@ type ExportRequestBody = {
 // union is declared locally — its members are a subset of ApiColor's, which
 // is enough for structural assignment into callout.color below.
 type NotionCalloutColor =
+  | "gray_background"
   | "red_background"
   | "yellow_background"
   | "orange_background"
@@ -123,6 +125,13 @@ function detectCalloutEmoji(line: string): string | null {
   return CALLOUT_EMOJIS.find((emoji) => trimmed.startsWith(emoji)) ?? null;
 }
 
+// A plain "> " quote line — anything that isn't an emoji callout or a
+// formula line (mirrors lib/markdown.tsx).
+function matchPlainQuote(line: string): string | null {
+  if (detectCalloutEmoji(line) || matchEquationLine(line) !== null) return null;
+  return matchQuoteLine(line);
+}
+
 function stripCalloutEmoji(line: string, emoji: string): string {
   return stripBlockquotePrefix(line.trim()).slice(emoji.length).trim();
 }
@@ -163,6 +172,37 @@ function convertLectureNoteToBlocks(markdown: string, depth = 0): BlockObjectReq
     const line = lines[index].trim();
     if (!line) {
       index++;
+      continue;
+    }
+
+    // Fenced code block -> Notion's own code block, verbatim.
+    if (isCodeFence(line)) {
+      const { code, next } = readCodeFence(lines, index);
+      blocks.push({
+        type: "code",
+        code: {
+          language: "plain text",
+          rich_text: chunkText(code, RICH_TEXT_CHAR_LIMIT).map((content) => ({ type: "text" as const, text: { content } })),
+        },
+      });
+      index = next;
+      continue;
+    }
+
+    // Formula lines (`> 🧮 ...`) -> a gray, bold 🧮 callout, one line per
+    // formula. Not Notion's native equation block: that takes KaTeX, and
+    // these formulas are plain text with Korean terms (자산 = 부채 + 자본).
+    if (matchEquationLine(line) !== null) {
+      const { items, next } = readMatchingRun(lines, index, matchEquationLine);
+      blocks.push({
+        type: "callout",
+        callout: {
+          icon: { type: "emoji", emoji: EQUATION_MARKER },
+          color: "gray_background",
+          rich_text: buildRichText(items.join("\n"), true),
+        },
+      });
+      index = next;
       continue;
     }
 
@@ -309,6 +349,13 @@ function convertLectureNoteToBlocks(markdown: string, depth = 0): BlockObjectReq
         },
       });
       index++;
+      continue;
+    }
+
+    if (matchPlainQuote(line) !== null) {
+      const { items, next } = readMatchingRun(lines, index, matchPlainQuote);
+      blocks.push({ type: "quote", quote: { rich_text: buildRichText(items.join("\n")) } });
+      index = next;
       continue;
     }
 

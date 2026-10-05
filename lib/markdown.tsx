@@ -2,6 +2,7 @@ import { Fragment, type ReactNode } from "react";
 import { MarkdownImage } from "@/components/MarkdownImage";
 import { SlideImage } from "@/components/SlideImage";
 import { tokenizeInline } from "@/lib/inlineMarkdown";
+import { isCodeFence, matchEquationLine, matchQuoteLine, readCodeFence, readMatchingRun } from "@/lib/noteBlocks";
 
 const CALLOUT_STYLES: Array<{ emoji: string; className: string }> = [
   // Deliberately bolder than every other callout below (thicker border,
@@ -43,6 +44,33 @@ function stripBlockquotePrefix(text: string): string {
 function detectCallout(text: string) {
   const trimmed = stripBlockquotePrefix(text.trim());
   return CALLOUT_STYLES.find((callout) => trimmed.startsWith(callout.emoji));
+}
+
+// A plain "> " quote line — anything that isn't an emoji callout or a
+// formula line.
+function matchPlainQuote(line: string): string | null {
+  if (detectCallout(line) || matchEquationLine(line) !== null) return null;
+  return matchQuoteLine(line);
+}
+
+// Notion-style formula block: a tinted, padded panel with the formula
+// centered in bold, one row per `> 🧮` line. break-keep keeps Korean terms
+// (자산, 부채) whole when a long formula wraps on a narrow screen.
+const EQUATION_BLOCK_CLASS =
+  "my-3 flex flex-col gap-1.5 rounded-lg border border-slate-200 bg-slate-100 px-4 py-3 text-center dark:border-zinc-700 dark:bg-zinc-800/70";
+const EQUATION_LINE_CLASS =
+  "text-[15px] font-semibold leading-relaxed tracking-wide text-zinc-900 break-keep dark:text-zinc-50";
+
+function renderEquationBlock(key: string | number, equations: string[]): ReactNode {
+  return (
+    <div key={key} role="math" className={EQUATION_BLOCK_CLASS}>
+      {equations.map((equation, equationIndex) => (
+        <p key={equationIndex} className={EQUATION_LINE_CLASS}>
+          {renderInline(equation)}
+        </p>
+      ))}
+    </div>
+  );
 }
 
 // <mark> is the note's "형광펜" — sentences the professor or the slides
@@ -158,9 +186,18 @@ function renderListNodes(nodes: ListNode[], keyPrefix: string): ReactNode[] {
         {run.map((node, itemIndex) => {
           const itemKey = `${runKey}-${itemIndex}`;
           const callout = detectCallout(node.text);
+          const equation = matchEquationLine(node.text);
           const nestedList = node.children.length > 0 && (
             <div className="mt-2">{renderListNodes(node.children, itemKey)}</div>
           );
+          if (equation !== null) {
+            return (
+              <li key={itemIndex} className="list-none -ml-5">
+                {renderEquationBlock("equation", [equation])}
+                {nestedList}
+              </li>
+            );
+          }
           if (callout) {
             return (
               <li key={itemIndex} className="list-none -ml-5">
@@ -205,6 +242,23 @@ export function renderMarkdown(markdown: string, slideImages?: Map<number, strin
     if (!line) {
       flushList(String(index));
       index++;
+      continue;
+    }
+
+    // Fenced code block — shown verbatim (no inline parsing), in the same
+    // tinted panel style as formula blocks.
+    if (isCodeFence(line)) {
+      flushList(String(index));
+      const { code, next } = readCodeFence(lines, index);
+      blocks.push(
+        <pre
+          key={index}
+          className="my-3 overflow-x-auto rounded-lg border border-slate-200 bg-slate-100 px-4 py-3 font-mono text-[13px] font-semibold leading-relaxed text-zinc-800 dark:border-zinc-700 dark:bg-zinc-800/70 dark:text-zinc-100"
+        >
+          <code>{code}</code>
+        </pre>,
+      );
+      index = next;
       continue;
     }
 
@@ -339,6 +393,13 @@ export function renderMarkdown(markdown: string, slideImages?: Map<number, strin
       continue;
     }
 
+    if (matchEquationLine(line) !== null) {
+      const { items, next } = readMatchingRun(lines, index, matchEquationLine);
+      blocks.push(renderEquationBlock(index, items));
+      index = next;
+      continue;
+    }
+
     const callout = detectCallout(line);
     if (callout) {
       // Greedily consume immediately-following plain lines into the same
@@ -355,6 +416,7 @@ export function renderMarkdown(markdown: string, slideImages?: Map<number, strin
         if (nextLine.startsWith("|")) break;
         if (SLIDE_IMAGE_PATTERN.test(nextLine) || IMAGE_PATTERN.test(nextLine)) break;
         if (detectCallout(nextLine)) break;
+        if (matchEquationLine(nextLine) !== null || isCodeFence(nextLine)) break;
         groupLines.push(stripBlockquotePrefix(nextLine));
         cursor++;
       }
@@ -366,6 +428,24 @@ export function renderMarkdown(markdown: string, slideImages?: Map<number, strin
         </div>,
       );
       index = cursor;
+      continue;
+    }
+
+    // Plain blockquote (no callout emoji) — previously shown with a literal
+    // ">" in front. Consecutive "> " lines form one quote.
+    if (matchPlainQuote(line) !== null) {
+      const { items, next } = readMatchingRun(lines, index, matchPlainQuote);
+      blocks.push(
+        <blockquote
+          key={index}
+          className="my-2 flex flex-col gap-1 rounded-r-lg border-l-4 border-slate-300 bg-slate-50 px-4 py-2.5 text-sm leading-[1.7] text-zinc-700 dark:border-zinc-600 dark:bg-zinc-900/60 dark:text-zinc-300"
+        >
+          {items.map((item, itemIndex) => (
+            <p key={itemIndex}>{renderInline(item)}</p>
+          ))}
+        </blockquote>,
+      );
+      index = next;
       continue;
     }
 

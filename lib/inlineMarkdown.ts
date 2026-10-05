@@ -21,6 +21,9 @@ export function stripMarkTags(text: string): string {
   return text.replace(MARK_TAG, "");
 }
 
+// Any ** left over after pairing (one opened and never closed on this
+// line — typically a formula the model broke across lines, or half-bolded)
+// is dropped instead of showing as literal asterisks.
 function splitBold(text: string): InlinePart[] {
   return text
     .split(BOLD_SPLIT)
@@ -28,8 +31,9 @@ function splitBold(text: string): InlinePart[] {
     .map((part) =>
       part.startsWith("**") && part.endsWith("**") && part.length > 4
         ? { text: part.slice(2, -2), bold: true }
-        : { text: part, bold: false },
-    );
+        : { text: part.replace(/\*\*/g, ""), bold: false },
+    )
+    .filter((part) => part.text.length > 0);
 }
 
 export function tokenizeInline(text: string): InlineGroup[] {
