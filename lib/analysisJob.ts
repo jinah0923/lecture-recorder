@@ -1,6 +1,6 @@
 "use client";
 
-import type { BlockedChunkNotice, ChecklistItem, TranscriptSegment } from "@/lib/types";
+import type { AnalysisEngine, BlockedChunkNotice, ChecklistItem, TranscriptSegment } from "@/lib/types";
 
 export type AnalysisJobResult = {
   transcript: TranscriptSegment[];
@@ -9,6 +9,7 @@ export type AnalysisJobResult = {
   lectureNote: string;
   checklist: ChecklistItem[];
   blockedChunks?: BlockedChunkNotice[];
+  engine?: AnalysisEngine;
 };
 
 export type BlobRefPayload = {
@@ -35,6 +36,26 @@ export type AnalyzeRequestPayload = {
   keywords: string[];
   slideThumbnails: unknown[];
 };
+
+// The OpenAI engine's request (app/api/transcribe-openai): reference PDFs
+// and text files go as browser-extracted text, image references as blobs.
+export type OpenAiAnalyzeRequestPayload = {
+  sessionId: string;
+  audioBlob: BlobRefPayload | null;
+  audioChunks?: Array<BlobRefPayload & { startMs: number }>;
+  referenceTexts: Array<{ fileName: string; text: string }>;
+  referenceImages: BlobRefPayload[];
+  bookmarks: unknown[];
+  keywords: string[];
+};
+
+// Whisper's per-file limit is 25MB — anything bigger is split in the browser
+// first even when it's short enough for Gemini to take whole.
+export const OPENAI_MAX_UNSPLIT_BYTES = 24 * 1024 * 1024;
+
+function analyzeEndpoint(engine: AnalysisEngine): string {
+  return engine === "openai" ? "/api/transcribe-openai" : "/api/transcribe-and-summarize";
+}
 
 // createdAt is on every variant (route.ts's JobRecord always writes it) —
 // pollJobUntilDone uses it as the poll timeout's origin point (see
@@ -129,8 +150,11 @@ async function readErrorMessage(response: Response, fallback: string): Promise<s
 // connection (see app/api/transcribe-and-summarize/route.ts). Persisting
 // the returned id (setStoredJobId) is the caller's job, not this function's,
 // since a fresh start and a resumed poll both want to control that timing.
-export async function startAnalysisJob(payload: AnalyzeRequestPayload): Promise<string> {
-  const response = await fetch("/api/transcribe-and-summarize", {
+export async function startAnalysisJob(
+  ...args: [engine: "gemini", payload: AnalyzeRequestPayload] | [engine: "openai", payload: OpenAiAnalyzeRequestPayload]
+): Promise<string> {
+  const [engine, payload] = args;
+  const response = await fetch(analyzeEndpoint(engine), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -151,9 +175,9 @@ export async function startAnalysisJob(payload: AnalyzeRequestPayload): Promise<
 // when a prior attempt for this session already completed STAGE 1 (STT).
 // Best-effort: a network hiccup here just means the button stays on its
 // default label rather than blocking anything.
-export async function checkSttCheckpoint(sessionId: string): Promise<boolean> {
+export async function checkSttCheckpoint(sessionId: string, engine: AnalysisEngine): Promise<boolean> {
   try {
-    const response = await fetch(`/api/transcribe-and-summarize?checkpointFor=${encodeURIComponent(sessionId)}`);
+    const response = await fetch(`${analyzeEndpoint(engine)}?checkpointFor=${encodeURIComponent(sessionId)}`);
     if (!response.ok) return false;
     const data = (await response.json()) as { hasCheckpoint?: unknown };
     return data.hasCheckpoint === true;
@@ -162,6 +186,21 @@ export async function checkSttCheckpoint(sessionId: string): Promise<boolean> {
   }
 }
 
+// Whether the server has OPENAI_API_KEY — drives whether the engine picker
+// offers OpenAI at all. Unknown (network failure) counts as unavailable.
+export async function fetchOpenAiEngineStatus(): Promise<{ configured: boolean }> {
+  try {
+    const response = await fetch("/api/transcribe-openai?status=1");
+    if (!response.ok) return { configured: false };
+    const data = (await response.json()) as { configured?: unknown };
+    return { configured: data.configured === true };
+  } catch {
+    return { configured: false };
+  }
+}
+
+// Both engines write the same `job:{id}` record (lib/analysisPipeline.ts),
+// so polling always goes through transcribe-and-summarize's GET.
 async function fetchJobStatus(jobId: string): Promise<JobStatusResponse> {
   const response = await fetch(`/api/transcribe-and-summarize?jobId=${encodeURIComponent(jobId)}`);
   if (!response.ok) {

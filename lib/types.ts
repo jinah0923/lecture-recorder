@@ -70,7 +70,14 @@ export type AiResult = {
   lectureNote: string;
   checklist: ChecklistItem[];
   blockedChunks?: BlockedChunkNotice[];
+  // Absent = Gemini (every result before the engine choice existed).
+  engine?: AnalysisEngine;
 };
+
+// Which pipeline analyzes a recording — chosen by the user before starting
+// (RecordingDetailView). "gemini" = app/api/transcribe-and-summarize,
+// "openai" = app/api/transcribe-openai (Whisper + GPT, never touches Gemini).
+export type AnalysisEngine = "gemini" | "openai";
 
 // Persisted shape — pure text/number metadata only. The audio itself lives on
 // the user's device (downloaded on recording, or already local for uploads);

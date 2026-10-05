@@ -8,12 +8,34 @@ import {
   describeGeminiError as describeSharedGeminiError,
   readResponseText,
 } from "@/lib/gemini";
-import { BLOCKED_CHUNK_MARKER, blockedChunkTranscriptText } from "@/lib/geminiMessages";
+import {
+  MAX_AUDIO_CHUNKS,
+  buildAnalysisResult,
+  deleteSttCheckpoint,
+  formatBookmarkLines,
+  normalizeSttSegments,
+  parseBlobRef,
+  readJobRecord,
+  readSttCheckpoint,
+  reportStage,
+  segmentsToTranscriptText,
+  writeJobRecord,
+  writeSttCheckpoint,
+} from "@/lib/analysisPipeline";
+import type {
+  AnalysisResult,
+  AudioChunkRef,
+  BlobRef,
+  CheckpointSegment,
+  IncomingBookmark,
+  RawAnalysisResponse,
+  SttCheckpoint,
+} from "@/lib/analysisPipeline";
+import { ANALYSIS_FIELD_DESCRIPTIONS, LATEX_BAN_RULE, buildAnalysisPrompt } from "@/lib/analysisPrompt";
+import { blockedChunkTranscriptText } from "@/lib/geminiMessages";
 import type { BlockedChunkNotice } from "@/lib/types";
 import type { File as GenAiFile, Part } from "@google/genai";
-import { stripMarkTags } from "@/lib/inlineMarkdown";
-import { VERBATIM_TERMINOLOGY_RULE } from "@/lib/promptRules";
-import { getRedisClient, isRedisConfigured } from "@/lib/redis";
+import { isRedisConfigured } from "@/lib/redis";
 
 // Node.js, not Edge — this route now talks to Redis via ioredis (see
 // lib/redis.ts) for job tracking, and ioredis needs a real TCP socket
@@ -62,26 +84,6 @@ export const dynamic = "force-dynamic";
 // (see the Vercel Blob relay below) — that part of the architecture is
 // unchanged, just no longer entangled with the connection-liveness problem.
 
-type IncomingBookmark = {
-  id: string;
-  label: string;
-  atMs: number;
-};
-
-type TranscriptSegment = {
-  id: string;
-  startMs: number;
-  endMs: number;
-  text: string;
-  source?: "blocked";
-};
-
-type ChecklistItem = {
-  id: string;
-  text: string;
-  done: boolean;
-};
-
 type IncomingSlideThumbnail = {
   page: number;
   dataUrl: string;
@@ -92,10 +94,6 @@ type IncomingBlobRef = {
   fileName?: unknown;
   mimeType?: unknown;
 };
-
-type BlobRef = { url: string; fileName: string; mimeType: string };
-// One browser-made slice of a long recording (see lib/audioChunking.ts).
-type AudioChunkRef = BlobRef & { startMs: number };
 
 type AnalyzeRequestBody = {
   // Identifies the recording across separate job attempts — required so a
@@ -118,49 +116,6 @@ type AnalyzeRequestBody = {
   audioChunks?: unknown;
 };
 
-type AnalysisResult = {
-  transcript: TranscriptSegment[];
-  fullText: string;
-  summary: string;
-  lectureNote: string;
-  checklist: ChecklistItem[];
-  blockedChunks?: BlockedChunkNotice[];
-};
-
-// The shape stored in Redis under `job:{jobId}` — see writeJobRecord/
-// readJobRecord below. `stage` is optional, human-readable progress text
-// (e.g. "청크 2/5 처리 중...") updated as a long, chunked job moves through
-// each step — purely informational for the client's progress UI, not
-// something correctness depends on.
-type JobRecord =
-  | { status: "processing"; createdAt: number; stage?: string }
-  | { status: "completed"; createdAt: number; result: AnalysisResult }
-  | { status: "error"; createdAt: number; error: string };
-
-// A single normalized STT segment, used both to build the checkpoint's
-// transcript text and to feed buildAnalysisResult on a resumed retry — see
-// SttCheckpoint below.
-// source "blocked" = placeholder for a chunk Gemini refused (see
-// runChunkedAnalysisJob).
-type CheckpointSegment = { startSeconds: number; endSeconds: number; text: string; source?: "blocked" };
-
-// STAGE 1 (STT) checkpoint — written the moment transcription finishes
-// (see runDirectAnalysisJob/runChunkedAnalysisJob), independent of whether
-// STAGE 2 (LLM analysis) that follows ever succeeds. Keyed by sessionId
-// (sttCheckpointKeyFor below), not jobId, so a later retry's fresh POST/job
-// can find it and skip STT entirely (runAnalysisOnlyFromCheckpoint). Only
-// ever written when hasSpeech is true — a no-speech result completes the
-// whole job in one step with nothing worth checkpointing (see both run*
-// functions' early returns).
-type SttCheckpoint = {
-  createdAt: number;
-  transcriptText: string;
-  segments: CheckpointSegment[];
-  hasSpeech: true;
-  // Carried so a resumed retry still reports which stretches were skipped.
-  blockedChunks?: BlockedChunkNotice[];
-};
-
 const MODEL = "gemini-3.6-flash";
 // Mirrors ReferenceDocDropzone's own cap (components/ReferenceDocDropzone.tsx)
 // — enforced here too since the client-side limit is only a UX nicety, not
@@ -169,31 +124,6 @@ const MAX_REFERENCE_FILES = 5;
 // How long to wait for an uploaded file to finish Gemini-side processing
 // (ACTIVE) before giving up.
 const FILE_PROCESSING_TIMEOUT_MS = 5 * 60 * 1000;
-// How long a job record survives in Redis — generous enough that reopening
-// the app well after a background/close still finds the result, bounded so
-// stale jobs don't accumulate forever.
-const JOB_TTL_SECONDS = 24 * 60 * 60;
-
-// How long a STAGE 1 (STT) checkpoint survives in Redis, keyed by sessionId
-// (not jobId — a checkpoint must outlive the specific job attempt that
-// created it, since its whole purpose is to be found again by a LATER,
-// separate POST/job when the user retries after a stage-2 failure). 24h
-// mirrors JOB_TTL_SECONDS — generous for "come back later and retry"
-// without keeping (potentially large) transcript text in Redis forever.
-const STT_CHECKPOINT_TTL_SECONDS = 24 * 60 * 60;
-
-// Long recordings are split into ~20-minute pieces IN THE BROWSER
-// (lib/audioChunking.ts, ffmpeg.wasm) before upload — this Function never
-// splits audio itself (no server-side ffmpeg binary exists on Vercel's
-// runtime). It just receives the pieces as separate blobs (audioChunks)
-// and transcribes each one. Cap guards this public route against absurd
-// inputs; 12 x 20min = 4h.
-const MAX_AUDIO_CHUNKS = 12;
-
-const NO_SPEECH_TRANSCRIPT = "감지된 음성 내용이 없습니다.";
-const NO_SPEECH_SUMMARY = "오디오에서 명확한 강의 음성을 찾을 수 없습니다.";
-const NO_SPEECH_NOTE = "오디오에서 강의 내용을 확인할 수 없어 상세 강의노트를 생성하지 못했습니다.";
-
 // Split into two independent schemas/calls (see callSttWorker/callAnalysisWorker
 // below) instead of one combined response — a single call sharing one
 // maxOutputTokens budget across a 30min+ verbatim transcript AND a deep,
@@ -229,37 +159,20 @@ const ANALYSIS_RESPONSE_SCHEMA = {
   properties: {
     summary: {
       type: Type.STRING,
-      description:
-        "녹음 음성만을 기반으로 한 핵심 요약 3~5개를 '• '로 시작하는 글머리 기호 리스트로 작성 (마크다운, 줄글 문단 형태 금지)",
+      description: ANALYSIS_FIELD_DESCRIPTIONS.summary,
     },
     lectureNote: {
       type: Type.STRING,
-      description:
-        "강의 음성과 참고자료를 통합해 원본의 정보량을 100% 보존한 무손실 상세 강의노트 (마크다운, 요약 금지). 번호가 매겨진 대주제(## 1. ...) 구조, 본문은 일반 텍스트/불릿 기본, 강조가 필요한 항목에만 선택적으로 '> 🚨'/'> 🔥'/'> 🗣️' 콜아웃 사용. 교수가 강조한 문장·자료에서 시각적으로 강조된 텍스트는 빠짐없이 포함하고 <mark>...</mark>로 형광펜 표시",
+      description: ANALYSIS_FIELD_DESCRIPTIONS.lectureNote,
     },
     checklist: {
       type: Type.ARRAY,
       items: { type: Type.STRING },
-      description: "학습자가 실천해야 할 과제/복습 체크리스트 문장 목록",
+      description: ANALYSIS_FIELD_DESCRIPTIONS.checklist,
     },
   },
   required: ["summary", "lectureNote", "checklist"],
 };
-
-// Shared by both workers' system instructions — Gemini otherwise tends to
-// reach for \rightarrow / $...$ style LaTeX for arrows and formulas, which
-// this app's markdown renderer doesn't support and renders as broken raw
-// syntax instead of the intended symbol.
-const LATEX_BAN_RULE =
-  "화살표나 기호를 작성할 때 절대 LaTeX 문법(예: \\rightarrow, $...$ 등 백슬래시 명령어나 달러 기호로 감싼 수식)을 " +
-  "사용하지 마십시오. 반드시 일반 텍스트 기호(예: ->, =>, →, ≥, ≤, ±)만 사용하십시오.";
-
-function formatTimestamp(ms: number) {
-  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-}
 
 // "data:image/webp;base64,AAAA..." -> a Gemini inline-image Part. Slide
 // thumbnails arrive this way (client-rendered canvas exports), never as an
@@ -271,125 +184,8 @@ function dataUrlToPart(dataUrl: string): Part | null {
   return createPartFromBase64(match[2], match[1]);
 }
 
-// Occasionally the model double-escapes newlines inside a JSON string value
-// (literal backslash+n instead of a real line break). Normalize defensively
-// so downstream markdown rendering sees real newlines either way.
-function fixEscapedNewlines(text: string): string {
-  return text.replace(/\\n/g, "\n");
-}
-
 function describeGeminiError(error: unknown): string {
   return describeSharedGeminiError(error, MODEL);
-}
-
-function parseBlobRef(raw: unknown): BlobRef | null {
-  if (!raw || typeof raw !== "object") return null;
-  const ref = raw as IncomingBlobRef;
-  const url = typeof ref.url === "string" ? ref.url : "";
-  const fileName = typeof ref.fileName === "string" ? ref.fileName : "";
-  const mimeType = typeof ref.mimeType === "string" ? ref.mimeType : "";
-  if (!url || !fileName) return null;
-  return { url, fileName, mimeType };
-}
-
-function jobKeyFor(jobId: string): string {
-  return `job:${jobId}`;
-}
-
-async function writeJobRecord(jobId: string, record: JobRecord): Promise<void> {
-  const redis = getRedisClient();
-  await redis?.set(jobKeyFor(jobId), JSON.stringify(record), "EX", JOB_TTL_SECONDS);
-}
-
-async function readJobRecord(jobId: string): Promise<JobRecord | null> {
-  const redis = getRedisClient();
-  const raw = await redis?.get(jobKeyFor(jobId));
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as JobRecord;
-  } catch {
-    return null;
-  }
-}
-
-// Updates only the progress text on an in-flight job (see runChunkedAnalysisJob),
-// preserving the original createdAt — the client's own poll timeout (see
-// lib/analysisJob.ts) measures elapsed time from that original value, so
-// this must never reset it the way a plain writeJobRecord("processing", ...)
-// call with Date.now() would. Best-effort: a failed progress update doesn't
-// fail the job itself, it just means the client sees a less specific
-// "분석 중..." label until the next successful one.
-async function reportStage(jobId: string, stage: string): Promise<void> {
-  try {
-    const existing = await readJobRecord(jobId);
-    const createdAt = existing?.status === "processing" ? existing.createdAt : Date.now();
-    await writeJobRecord(jobId, { status: "processing", createdAt, stage });
-  } catch (error) {
-    console.error("[transcribe-and-summarize] failed to report stage", { jobId, stage, error });
-  }
-}
-
-function sttCheckpointKeyFor(sessionId: string): string {
-  return `stt-checkpoint:${sessionId}`;
-}
-
-async function writeSttCheckpoint(sessionId: string, checkpoint: SttCheckpoint): Promise<void> {
-  try {
-    const redis = getRedisClient();
-    await redis?.set(sttCheckpointKeyFor(sessionId), JSON.stringify(checkpoint), "EX", STT_CHECKPOINT_TTL_SECONDS);
-  } catch (error) {
-    // Best-effort, like reportStage — a failed checkpoint write shouldn't
-    // fail the job that's still in progress; it just means a future retry
-    // (if this job later fails at stage 2) won't have anything to resume
-    // from and will redo STT from scratch instead.
-    console.error("[transcribe-and-summarize] failed to write STT checkpoint", { sessionId, error });
-  }
-}
-
-async function readSttCheckpoint(sessionId: string): Promise<SttCheckpoint | null> {
-  const redis = getRedisClient();
-  const raw = await redis?.get(sttCheckpointKeyFor(sessionId));
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as SttCheckpoint;
-  } catch {
-    return null;
-  }
-}
-
-async function deleteSttCheckpoint(sessionId: string): Promise<void> {
-  try {
-    const redis = getRedisClient();
-    await redis?.del(sttCheckpointKeyFor(sessionId));
-  } catch (error) {
-    // Non-critical — TTL cleans it up eventually either way, and a
-    // completed job never reads this key again regardless.
-    console.error("[transcribe-and-summarize] failed to delete STT checkpoint", { sessionId, error });
-  }
-}
-
-// Turns a worker's raw script array into concrete numeric segments — shared
-// by the checkpoint write path (both run* functions) so a resumed retry
-// (runAnalysisOnlyFromCheckpoint) sees the exact same segment shape either
-// way, regardless of whether the original attempt was direct or chunked.
-function normalizeSttSegments(rawScript: unknown): CheckpointSegment[] {
-  const rawSegments = Array.isArray(rawScript) ? rawScript : [];
-  return rawSegments.map((segment) => {
-    const s = segment as { startSeconds?: unknown; endSeconds?: unknown; text?: unknown };
-    return {
-      startSeconds: Number(s.startSeconds ?? 0),
-      endSeconds: Number(s.endSeconds ?? 0),
-      text: typeof s.text === "string" ? s.text : "",
-    };
-  });
-}
-
-// Same timestamped-line format runChunkedAnalysisJob already used for its
-// merged transcript — kept identical so the analysis worker sees the same
-// shape of input whether it's reading a checkpointed transcript or a
-// freshly-merged chunked one.
-function segmentsToTranscriptText(segments: CheckpointSegment[]): string {
-  return segments.map((s) => `[${formatTimestamp(s.startSeconds * 1000)}] ${s.text}`).join("\n");
 }
 
 const GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com";
@@ -515,7 +311,6 @@ async function deleteUploadedFile(ai: GoogleGenAI, file: GenAiFile | null): Prom
 }
 
 type RawSttResponse = { hasSpeech?: unknown; script?: unknown };
-type RawAnalysisResponse = { summary?: unknown; lectureNote?: unknown; checklist?: unknown };
 
 // Worker A — STT only. Its entire maxOutputTokens budget goes toward the
 // verbatim transcript alone, so a long lecture no longer competes with the
@@ -598,212 +393,10 @@ async function callAnalysisWorker(
   keywords: string[],
   bookmarkLines: string,
 ): Promise<RawAnalysisResponse> {
-  const hasReference = uploadedReferences.length > 0;
-  const hasSlideImages = slideThumbnails.length > 0;
-  const sourceLabel = audioSource.kind === "file" ? "강의 녹음 오디오" : "강의 스크립트 전문(이미 완성된 정확한 받아쓰기)";
-
-  const systemInstruction = [
-    ACADEMIC_CONTEXT_INSTRUCTION,
-    `당신은 요약자(Summarizer)가 아니라, ${sourceLabel}(및 첨부된 경우 강의 참고자료)에 담긴 모든 디테일을 하나도 빠뜨리지 않고 ` +
-      "기록하는 구조화 전문가(Meticulous Documenter)입니다. 당신의 임무는 내용을 줄이는 것이 아니라, 원본의 정보를 100% 보존한 채 " +
-      "읽기 쉬운 구조(제목·불릿·하위 항목·표)로 재배치하는 것입니다.",
-    "반드시 지정된 JSON 스키마 형식으로만 응답하세요. 설명 문장은 한국어로 쓰되, 전문 용어는 아래 [원본 워딩 최우선 보존] " +
-      "규칙을 따르세요.",
-    VERBATIM_TERMINOLOGY_RULE,
-    audioSource.kind === "file"
-      ? "오디오를 문장 그대로 받아쓰는 것이 아니라 들린 모든 정보를 빠짐없이 구조화해 기록하세요 — 전체 스크립트(받아쓰기) 자체는 " +
-        "별도의 전담 프로세스가 처리합니다."
-      : "아래 제공된 강의 스크립트 전문은 이미 완성된 정확한 받아쓰기입니다 — 문장을 그대로 복사하지는 말되, 그 안의 모든 " +
-        "정보를 빠짐없이 구조화해 기록하세요.",
-    `${sourceLabel}와 참고자료에 실제로 있는 내용만 다루고, 추측하거나 지어내지 마세요.`,
-    "summary와 lectureNote는 역할이 다릅니다: 요약이 허용되는 곳은 오직 summary(짧은 개요) 하나뿐이고, lectureNote는 음성과 " +
-      "참고자료의 정보를 100% 보존하는 무손실 기록입니다. lectureNote에서는 어떤 형태의 압축·축약·생략도 허용되지 않습니다.",
-    LATEX_BAN_RULE,
-    audioSource.kind === "file"
-      ? "오디오에 사람이 말하는 강의 음성이 실제로 들리면 summary/lectureNote/checklist를 모두 채우세요. 오디오에 사람의 " +
-        "말소리가 없거나 무음, 배경음악, 단순 신호음/잡음뿐이어서 강의 내용을 알아들을 수 없는 경우 summary와 " +
-        "lectureNote는 빈 문자열로, checklist는 빈 배열로 응답하세요. 이 경우 절대로 내용을 지어내지 마세요."
-      : "제공된 스크립트를 바탕으로 summary/lectureNote/checklist를 모두 채우세요.",
-  ].join(" ");
-
-  const promptLines = [
-    audioSource.kind === "file"
-      ? "첨부된 강의 녹음 오디오(및 참고자료)를 바탕으로 아래 항목을 생성해주세요. 전체 스크립트(받아쓰기)는 별도로 " +
-        "처리되니 신경 쓰지 않아도 됩니다."
-      : "아래 [강의 스크립트 전문](및 첨부된 경우 참고자료)을 바탕으로 아래 항목을 생성해주세요.",
-    "1. summary: 녹음 음성만을 기반으로 핵심 내용 3~5개를 골라 각 줄을 '• '로 시작하는 글머리 기호 리스트로 작성하세요 " +
-      "(줄글 문단 형태로 쓰지 말 것). 참고자료 내용은 여기에 포함하지 마세요.",
-    "2. lectureNote: 시험 대비용 상세 강의노트 (마크다운). 아래 [상세 강의노트 작성 지침]을 반드시 따르세요.",
-    "3. checklist: 학습자가 실천해야 할 과제 또는 복습해야 할 핵심 항목 목록 (문장 배열).",
-    "",
-    "[상세 강의노트 작성 지침] lectureNote는 summary보다 훨씬 상세하고 포괄적으로 작성하세요.",
-    "- [절대 무손실(Absolute Zero Omission) — 최우선 규칙, 다른 모든 규칙보다 우선] lectureNote는 아무리 길어지더라도 원본 " +
-      "음성/스크립트의 정보량을 100% 보존해야 합니다. 분량 제한은 없습니다 — 노트가 길어지는 것은 전혀 문제가 아니며, 내용이 " +
-      "빠지는 것만이 문제입니다. 특히 교수가 특정 슬라이드·도표·메커니즘(예: 단백질 가수분해 8단계 메커니즘)을 수 분(5분 이상) " +
-      "동안 길게 설명한 구간은 절대 1~2줄로 압축하지 마세요. 그런 구간은 (1) 교수의 설명 순서와 흐름을 그대로 따라, (2) 각 " +
-      "단계/항목을 개별 불릿으로 나누고, (3) 그 아래 하위 불릿으로 교수가 덧붙인 예시·비유·수치·인과관계(왜 그렇게 되는지, " +
-      "그 결과 무엇이 일어나는지)·주의사항을 낱낱이 풀어서 기록하세요. 판단 기준: 이 노트만 읽은 학생이 녹음을 듣지 않고도 " +
-      "교수가 말한 모든 설명을 빠짐없이 복원할 수 있어야 합니다. 설명 시간이 길었던 구간일수록 노트 분량도 그만큼 길어야 합니다.",
-    "- [단순 요약 절대 금지] lectureNote를 짧은 요약문으로 작성하는 것은 절대 금지합니다. 강의에 등장하는 모든 전문 용어, " +
-      "구체적인 수치와 지표(예: 5일선, 30주선 등 실제 언급된 숫자·기준), 핵심 기법(예: 눌림목 매매, 박스권 돌파 등 " +
-      "실제 언급된 방법론·전략명)을 단 하나도 빠짐없이 포함하세요. 대학 전공 서적이나 실전 비법서처럼 구조화되고 " +
-      "깊이 있는 텍스트로 작성하세요 — 표면적으로 훑고 지나가는 개요가 아니라, 각 개념을 왜/어떻게/언제 적용하는지까지 " +
-      "설명하는 수준이어야 합니다.",
-    "- [포괄성] 강의 중 언급된 사소한 팁, 교수의 코멘트, 슬라이드 속 세부 텍스트/표까지 빠짐없이 모두 수록하세요.",
-    "- [활동 구간도 동등하게 취급 — 임의 축소 금지] 학생들 간의 조별 토론, 아이스브레이킹, 역할 분담, 팀별 발표처럼 " +
-      "'활동/대화형' 구간이 교수님의 '학술적/이론적' 설명 구간과 함께 녹음에 들어있더라도, 활동 구간의 중요도를 AI가 " +
-      "임의로 낮게 판단해 요약을 줄이거나 통째로 생략하지 마세요. 두 유형의 내용 모두 위 [단순 요약 절대 금지]/[포괄성] " +
-      "규칙과 동일한 수준의 상세함으로 빠짐없이 다루세요 — 녹음이 길거나 여러 구간(활동 전반부 + 이론 후반부 등)으로 " +
-      "이어지는 경우도 마찬가지입니다.",
-    "- [중복 주제 통합] 강의가 여러 구간(전반부/후반부, 여러 차시 등)으로 나뉘어 있거나 같은 주제(예: 과제 안내, 평가 기준, " +
-      "AI 활용/윤리 원칙 등)가 녹음 중 여러 번 반복해서 언급되더라도, 같은 대주제를 두 번 만들지 마세요. 겹치거나 " +
-      "동일한 주제는 반드시 하나의 대주제로 통합해 한 곳에서만 다루세요. 단, 통합은 제목을 하나로 합치는 것이지 내용을 " +
-      "줄이는 것이 아닙니다 — 여러 구간에서 각각 나온 세부 설명은 [절대 무손실] 규칙에 따라 통합된 대주제 아래 모두 남기세요.",
-    "- [최종 결론만 반영] 교수가 강의 도중 말을 바꾸거나 이전 안내를 정정하는 과정이 그대로 들리더라도(예: '원래 " +
-      "다음 주까지였는데 이번 주 금요일로 당길게요'), 그 논의·변경 과정 자체를 서술하지 마세요. 여러 차례 언급된 " +
-      "내용 중 가장 나중에 확정된 최종 결론만 반영하고, 이미 폐기되거나 정정된 이전 안내(예: 변경 전 마감일)는 " +
-      "결과에 남기지 마세요. 이 규칙은 정정·번복된 공지(마감일, 범위, 배점 등)에만 적용됩니다 — 개념 설명이나 예시를 " +
-      "\"중복\" 또는 \"덜 중요\"하다는 이유로 빼는 근거로 쓰지 마세요.",
-    "- [핵심 단서 최상단 배치] 학점 컷오프, 최종 과제 제출 마감일처럼 절대 놓치면 안 되는 핵심 정보가 있다면, 본문 " +
-      "어딘가에 묻혀 놓치기 쉽지 않도록 lectureNote의 맨 첫 줄(대주제 1번보다 앞)에 '> 🔥' 콜아웃으로 요약해 배치하세요. " +
-      "해당하는 핵심 단서가 없다면 이 콜아웃은 생략하세요.",
-    "- [구조] 이 최상단 콜아웃 다음으로, 전체 내용을 대주제 단위로 나누어 \"## 1. 대주제명\", \"## 2. 대주제명\"처럼 " +
-      "번호를 매긴 H2 제목으로 구성하고, 필요하면 그 안에서 H3(###) 소제목으로 세분화하세요. 각 대주제 아래 일반적인 " +
-      "설명·배경지식·세부 내용은 기본적으로 평범한 문단이나 글머리 기호(- 또는 •) 리스트로 작성하세요. 단, 바로 아래 " +
-      "[1부/2부 시간 흐름 구조] 조건에 해당하는 녹음이라면 이 H2 번호 매김 대신 그 규칙을 최상위 구조로 사용하세요.",
-    "- [1부/2부 시간 흐름 구조 — 조건부 고정 포맷] 녹음 안에 (a) 학생들끼리의 조별 토론/브레인스토밍/역할 분담/" +
-      "아이스브레이킹/팀별 발표 같은 '활동' 구간과 (b) 그 뒤에 이어지는 교수님의 이론 설명/피드백/개념 정리 구간이 " +
-      "실제로 시간 순서대로 모두 존재하는 경우에만 적용하는 규칙입니다. 이 조건을 만족하면, 위 [구조] 규칙의 " +
-      "\"## 대주제\" 번호 매김 대신 최상단 콜아웃 바로 다음에 아래 두 제목을 정확히 이 문구 그대로, 고정 순서로 " +
-      "사용해 최상위 구조를 만드세요:\n" +
-      "  ### 1부: 학생 조별 토론 및 활동\n" +
-      "  ### 2부: 교수님 이론 설명 및 피드백 (모범 답안)\n" +
-      "1부에는 학생들 간 브레인스토밍, 역할 분담, 아이스브레이킹, 팀별 발표 내용을, 2부에는 학생 발표 이후 이어지는 " +
-      "교수님의 피드백과 학자/이론 설명, 핵심 지식 정리를 담으세요. 각 부 안에서 세부 주제를 더 나눠야 한다면 " +
-      "##/###(H2/H3)를 쓰지 말고 H4(####) 소제목이나 굵게(**) 강조 + 글머리 기호를 사용하세요 — 1부/2부보다 " +
-      "시각적으로 더 크거나 같은 제목이 그 안에 나오면 안 됩니다. 이 조건에 해당하지 않는(학생 활동 구간이 없는) " +
-      "순수 이론 강의라면 절대 억지로 1부/2부 구조를 만들지 말고, 기존 [구조] 규칙대로 대주제 단위로만 구성하세요.",
-    "- [시험 출제 신호 감지 — 엄격한 조건에서만, 놓치면 안 됨] 교수가 \"시험에 나온다\", \"무조건 출제된다\", " +
-      '"별표 쳐라", "이거 매우 중요하다", "이건 시험에 낼 거예요"처럼 시험 출제 가능성을 명시적으로/직접적으로 ' +
-      "언급한 구간만 대상입니다. 이런 명시적 언급이 있다면 강의 전체에서 단 한 곳도 빠짐없이 찾아내세요. " +
-      "절대 AI가 자의적으로 중요도를 판단해서 이 표시를 붙이지 마세요 — 단순히 참고자료(교재)에 없는 내용이라는 " +
-      "이유, 설명 분량이 많다는 이유, 또는 여러 번 반복됐다는 이유만으로는 이 표시를 사용할 수 없습니다. 교수가 " +
-      "위 예시처럼 시험 출제를 명시적으로 언급하지 않았다면 절대 이 형식을 사용하지 마세요. 해당 내용은 다른 " +
-      "콜아웃이나 일반 텍스트와 뚜렷이 구별되도록 아래 형식을 정확히 그대로 사용해 표시하세요 (대괄호 안 문구와 " +
-      "굵게 표시 포함):\n" +
-      "  > 🚨 **[시험 출제 100%]** 교수님 강조 내용: (실제로 언급된 내용을 그대로 서술)",
-    "- [선택적 강조, 중첩 금지] 모든 문장을 콜아웃 박스로 감싸지 마세요(도배 금지). 아래 세 경우에만 해당 문장 앞에 " +
-      '"> " 를 붙인 인용(blockquote) 콜아웃으로 선택적으로 강조하세요. 콜아웃 박스 안에 또 다른 "> " 인용문을 ' +
-      "중첩해서 넣지 마세요 — 콜아웃은 항상 1단계로만 작성합니다.",
-    "  > 🚨 [시험 출제 확정]: 바로 위 [시험 출제 신호 감지] 규칙에 해당하는 내용 (형식은 그 규칙의 예시를 그대로 따르세요)",
-    "  > 🔥 [핵심 강조]: 교수가 강조했지만 출제 여부를 직접 언급하지는 않은 중요 개념 — 🚨 항목과 중복해서 표시하지 마세요",
-    "  > 🗣️ [교수님 코멘트/사례]: 맥락 이해를 돕는 교수님의 예시나 인상적인 멘트",
-    "  그 외 일반적인 설명은 콜아웃 없이 작성하세요.",
-    "- [강조 요소 절대 보존 + 형광펜(<mark>) 표시 — 최우선급 규칙] 아래 두 종류의 '강조된 내용'은 핵심 출제 포인트로 " +
-      "간주해 단 하나도 빠짐없이 lectureNote에 포함하세요([절대 무손실] 규칙과 동일한 수준). 그리고 그 문장(또는 구절) " +
-      "자체를 반드시 HTML `<mark>...</mark>` 태그로 감싸 형광펜 표시하세요 — 단순 텍스트로 적지 마세요.\n" +
-      "  (1) 시각적 강조(첨부된 경우): 강의자료(PDF)나 슬라이드 이미지에서 형광펜(하이라이트), 밑줄, 붉은색 등 색깔 글씨, " +
-      "굵은 글씨, 박스·별표 등으로 강조된 텍스트. 교수가 음성으로 언급하지 않았더라도 반드시 포함하세요.\n" +
-      "  (2) 청각적 강조: 교수가 \"중요하다\", \"밑줄 그어라\", \"별표 쳐라\", \"꼭 기억해라\", \"시험에 나온다\"처럼 " +
-      "명시적으로 강조한 문장.\n" +
-      "  형식: `<mark>강조된 내용</mark>`. 태그는 한 줄 안에서 열고 닫으세요(여러 줄이나 여러 불릿에 걸치지 말 것 — " +
-      "필요하면 불릿마다 따로 감싸세요). 볼드가 필요하면 태그 안쪽에 쓰세요: `<mark>**myoblast**는 fusion해서 " +
-      "myotube가 된다</mark>`. `<mark>` 외의 HTML 태그(`<u>`, `<span>`, `<font>`, `<b>` 등)는 쓰지 마세요. 본문·불릿·" +
-      "표 셀·콜아웃 안 등 어디에 쓰이든 같은 방식으로 적용합니다.\n" +
-      "  🚨 콜아웃과의 관계: 🚨 [시험 출제 100%] 콜아웃은 위 [시험 출제 신호 감지] 규칙 그대로, 시험 출제를 명시적으로 " +
-      "언급한 경우에만 씁니다 — 그리고 그 콜아웃 안의 핵심 문장도 `<mark>`로 감싸세요. 시험 언급 없이 \"중요하다\", " +
-      "\"밑줄 그어라\"라고만 한 문장이나 자료에서 시각적으로 강조된 문장은 🚨를 붙이지 말고 `<mark>`만 쓰세요.\n" +
-      "  남용 금지: 교수나 자료가 실제로 강조한 내용에만 쓰세요. 당신이 중요하다고 판단했을 뿐 실제로 강조되지 " +
-      "않은 문장에는 쓰지 마세요. summary와 checklist에는 `<mark>`를 쓰지 마세요.",
-    "- [비교 표 필수] 성적 평가 비율, 과제 제출 일정, AI 활용 가이드라인처럼 서로 비교 가능한 항목이 3개 이상 " +
-      "나열되는 경우, 절대 줄글 문단이나 글머리 기호 리스트로 나열하지 말고 반드시 Markdown 표(\"| 항목 | 내용 |\" " +
-      "형식, 구분선 행 포함)로 작성하세요.",
-    "- [부가 정보는 토글로] 교수 소개, 본문 흐름과 무관한 잡담처럼 수업 내용 자체와 관련 없는 부가 참고 정보는 아래 " +
-      "예시와 정확히 같은 형식으로 감싸서, 본문이 번잡해지지 않도록 하세요 (summary에는 짧은 제목만 넣고, " +
-      "<details>/<summary>/</details> 태그는 반드시 각각 단독 줄에 작성). 단, 위 [1부/2부 시간 흐름 구조]가 적용되는 " +
-      "경우 학생 조별 토론/아이스브레이킹/팀별 발표는 수업의 실제 활동 구간이므로 이 토글로 숨기지 말고 반드시 " +
-      "1부 본문에 그대로 서술하세요 — 토글은 그 구조가 적용되지 않는 강의의 사소한 잡담에만 쓰세요:\n" +
-      "  <details>\n" +
-      "  <summary>부가 정보 제목</summary>\n" +
-      "\n" +
-      "  내용\n" +
-      "\n" +
-      "  </details>",
-    "- [서식] 핵심 용어는 볼드체(**)로 강조하세요. 용어 자체는 [원본 워딩 최우선 보존] 규칙대로 교수가 말한 그 단어로 쓰세요 " +
-      "(마크다운 표의 항목명·키워드 칸도 마찬가지).",
-  ];
-
-  if (hasReference) {
-    promptLines.push(
-      "- [자료 연계] 강의자료에 도식/표/다이어그램이 포함된 구간을 다룰 때는 본문에 \"[슬라이드 N페이지: OO 도식 참조]\" 형태로 표기하세요. " +
-        "정확한 페이지 번호를 알 수 없으면 \"[강의자료: OO 도식 참조]\"로 표기하세요. " +
-        '교수가 말로 설명하지 않았지만 슬라이드/자료에만 있는 필수 개념은 "> 💡 [강의자료 보충] ..." 콜아웃으로 선택적으로 덧붙일 수 있습니다.',
-      "- [출처 교차검증 태그] 강의 참고자료(교재)와 오디오 스크립트를 항목별로 교차 검증하세요. 내용을 누락하거나 " +
-        "별도의 표로 분리하지 말고, lectureNote 본문의 해당 불릿 포인트/문장 끝에 아래 두 태그 중 해당하는 것만 " +
-        "간단히 붙이세요:\n" +
-        "  · 참고자료(교재)에는 없지만 교수가 강의에서 말로 추가로 덧붙인 설명이나 여담이라면 문장 끝에 " +
-        "`🎙️ [녹음 추가]`를 붙이세요.\n" +
-        "  · 참고자료(교재)에는 있지만 교수가 강의 중 소리 내어 읽거나 설명하지 않고 넘어간(스킵한) 내용이라면 " +
-        "문장 끝에 `⚠️ [자료 생략]`를 붙이세요.\n" +
-        "  참고자료와 강의 음성 양쪽에 모두 있는 공통 내용에는 시각적 깔끔함을 위해 어떤 태그도 붙이지 마세요. " +
-        "이 태그는 항목 끝에 짧게 부착하는 표시일 뿐이므로, 이 태그를 붙인다는 이유로 해당 내용을 별도 섹션이나 " +
-        "표로 분리하지 마세요.",
-    );
-  } else {
-    promptLines.push("- 강의자료가 첨부되지 않았으므로 음성 강의 내용만으로 최대한 상세하게 작성하세요.");
-  }
-
-  if (hasSlideImages) {
-    promptLines.push(
-      "- [슬라이드 사진 연동 — 이미지는 어디까지나 보조 수단] 이어서 강의 슬라이드 사진이 페이지 순서대로" +
-        "(슬라이드 1, 슬라이드 2, ...) 제공됩니다. 제공된 PDF 슬라이드 이미지(차트, 수식, 다이어그램)를 강의 내용과 " +
-        "대조 분석하십시오. 사진 하나에 짧은 텍스트 한 줄만 적는 성의 없는 구조는 절대 금지합니다. 강의노트의 " +
-        "핵심은 어디까지나 탄탄하고 상세한 텍스트 설명입니다 — 먼저 해당 개념·차트·수식을 글로 완전하게 풀어서 " +
-        "설명한 뒤(위 [단순 요약 절대 금지] 지침 수준의 상세함으로), 시각적 이해가 반드시 필요한 경우에만 그 설명 " +
-        "바로 아래에 보조적으로 `![슬라이드 X](slide_X)` 형식의 이미지 플레이스홀더를 삽입하십시오 (X는 해당 슬라이드의 " +
-        "페이지 번호). 텍스트 설명 없이 이미지만 덩그러니 넣지 마세요. 실제로 차트/다이어그램/수식 등 시각 자료가 있어 " +
-        "사진으로 보여주는 것이 학습에 도움이 되는 슬라이드에만 삽입하고, 텍스트뿐인 슬라이드에는 남용하지 마세요.",
-    );
-  }
-
-  if (keywords.length > 0) {
-    promptLines.push(
-      "",
-      "[STT 보정 지침] 다음은 이 강의의 전문 용어/고유명사 목록입니다. 발음이 비슷해 음성 인식 중 오타가 날 수 있는 단어들이니, " +
-        `summary, lectureNote 작성 시 이 목록을 사전(Glossary)으로 참고하여 정확한 표기로 교정해주세요: ${keywords.join(", ")}`,
-    );
-  }
-
-  if (hasReference) {
-    promptLines.push(
-      "",
-      uploadedReferences.length > 1
-        ? `[강의안 통합 지침] 오디오와 함께 강의 참고자료 ${uploadedReferences.length}개(슬라이드/문서)가 첨부되어 있습니다. 개별 자료로 따로 다루지 말고, 모두 하나의 강의 자료 묶음으로 취급해 종합적으로 활용하세요.`
-        : "[강의안 통합 지침] 오디오와 함께 강의 참고자료(슬라이드/문서)가 첨부되어 있습니다.",
-      "- STT 보정: 참고자료에 나오는 전문 용어와 고유명사도 사전으로 활용해 오인식을 교정하세요.",
-      "- 통합 체크리스트: 교수가 음성으로 언급한 과제/공지사항뿐 아니라, 참고자료에 있는 연습문제나 반드시 암기해야 할 핵심 항목도 checklist에 포함하세요.",
-    );
-  }
-
-  if (bookmarkLines) {
-    promptLines.push("", `학습자가 녹음 중 남긴 타임스탬프 북마크:\n${bookmarkLines}`);
-  }
-
-  if (audioSource.kind === "transcript") {
-    // Plain text, not a file Part — cheaper on input tokens than the raw
-    // audio would have been anyway, and this worker only needs to read it,
-    // not listen to it.
-    if (audioSource.text.includes(BLOCKED_CHUNK_MARKER)) {
-      promptLines.push(
-        "",
-        `[차단 구간] 스크립트에 '${BLOCKED_CHUNK_MARKER}'라고 표시된 줄은 녹음 일부가 받아쓰기되지 못한 빈 구간입니다. ` +
-          "그 구간의 내용을 추측하거나 지어내지 말고, 나머지 스크립트만으로 작성하세요.",
-      );
-    }
-    promptLines.push("", "[강의 스크립트 전문]", audioSource.text);
-  }
-
-  const userPrompt = promptLines.join("\n");
+  const prompt = buildAnalysisPrompt(audioSource, uploadedReferences.length, slideThumbnails.length > 0, keywords, bookmarkLines);
+  // The academic-context framing is Gemini-only (see lib/gemini.ts).
+  const systemInstruction = `${ACADEMIC_CONTEXT_INSTRUCTION} ${prompt.systemInstruction}`;
+  const userPrompt = prompt.userPrompt;
 
   const contentParts: (string | Part)[] = [userPrompt];
   if (audioSource.kind === "file") {
@@ -855,64 +448,6 @@ async function callAnalysisWorker(
   } catch {
     throw new Error("분석 응답을 해석하는 데 실패했습니다. 다시 시도해주세요.");
   }
-}
-
-// Shared by both the direct and chunked paths — turns the two workers' raw
-// JSON into the final typed result, applying the same no-speech short
-// circuit and field normalization either way.
-function buildAnalysisResult(
-  sttSegments: unknown,
-  hasSpeechFlag: boolean,
-  analysisResult: RawAnalysisResponse,
-  blockedChunks: BlockedChunkNotice[] = [],
-): AnalysisResult {
-  const rawSegments = Array.isArray(sttSegments) ? sttSegments : [];
-  const hasSpeech = hasSpeechFlag && rawSegments.length > 0;
-
-  if (!hasSpeech) {
-    return {
-      transcript: [{ id: "seg-0", startMs: 0, endMs: 0, text: NO_SPEECH_TRANSCRIPT }],
-      fullText: NO_SPEECH_TRANSCRIPT,
-      summary: NO_SPEECH_SUMMARY,
-      lectureNote: NO_SPEECH_NOTE,
-      checklist: [],
-    };
-  }
-
-  const transcript: TranscriptSegment[] = rawSegments.map((segment, index) => {
-    const s = segment as { startSeconds?: unknown; endSeconds?: unknown; text?: unknown; source?: unknown };
-    return {
-      id: `seg-${index}`,
-      startMs: Math.round(Number(s.startSeconds ?? 0) * 1000),
-      endMs: Math.round(Number(s.endSeconds ?? 0) * 1000),
-      text: typeof s.text === "string" ? fixEscapedNewlines(s.text.trim()) : "",
-      ...(s.source === "blocked" ? { source: "blocked" as const } : {}),
-    };
-  });
-
-  const fullText = transcript.map((segment) => segment.text).join(" ").trim();
-  const summary = typeof analysisResult.summary === "string" ? fixEscapedNewlines(analysisResult.summary.trim()) : "";
-  const lectureNote =
-    typeof analysisResult.lectureNote === "string" ? fixEscapedNewlines(analysisResult.lectureNote.trim()) : "";
-  const checklistTexts = Array.isArray(analysisResult.checklist)
-    ? analysisResult.checklist.filter((item): item is string => typeof item === "string")
-    : [];
-  const checklist: ChecklistItem[] = checklistTexts.map((text, index) => ({
-    id: `check-${index}`,
-    // Checklist items render as plain text everywhere (ChecklistPanel, the
-    // weekly feed, Notion to-dos), so a stray 형광펜 tag would show raw.
-    text: stripMarkTags(fixEscapedNewlines(text)),
-    done: false,
-  }));
-
-  return {
-    transcript,
-    fullText,
-    summary,
-    lectureNote,
-    checklist,
-    ...(blockedChunks.length > 0 ? { blockedChunks } : {}),
-  };
 }
 
 // Shared by both paths — reference docs are always uploaded whole
@@ -977,9 +512,7 @@ async function runDirectAnalysisJob(
     throw error;
   }
 
-  const bookmarkLines = bookmarks
-    .map((bookmark) => `- [${formatTimestamp(bookmark.atMs)}] ${bookmark.label}`)
-    .join("\n");
+  const bookmarkLines = formatBookmarkLines(bookmarks);
 
   // Two independent Gemini calls in parallel — see callSttWorker/
   // callAnalysisWorker above for why this replaced the old single combined
@@ -1000,7 +533,7 @@ async function runDirectAnalysisJob(
       const hasSpeech = result.hasSpeech === true && Array.isArray(result.script) && result.script.length > 0;
       if (hasSpeech) {
         const segments = normalizeSttSegments(result.script);
-        await writeSttCheckpoint(sessionId, {
+        await writeSttCheckpoint(sessionId, "gemini", {
           createdAt: Date.now(),
           transcriptText: segmentsToTranscriptText(segments),
           segments,
@@ -1163,7 +696,7 @@ async function runChunkedAnalysisJob(
     // never forces every chunk to be re-split, re-uploaded, and
     // re-transcribed on retry (see runAnalysisOnlyFromCheckpoint).
     const transcriptText = segmentsToTranscriptText(mergedSegments);
-    await writeSttCheckpoint(sessionId, {
+    await writeSttCheckpoint(sessionId, "gemini", {
       createdAt: Date.now(),
       transcriptText,
       segments: mergedSegments,
@@ -1173,9 +706,7 @@ async function runChunkedAnalysisJob(
 
     await reportStage(jobId, "AI 요약 생성 중...");
 
-    const bookmarkLines = bookmarks
-      .map((bookmark) => `- [${formatTimestamp(bookmark.atMs)}] ${bookmark.label}`)
-      .join("\n");
+    const bookmarkLines = formatBookmarkLines(bookmarks);
 
     let analysisResult: RawAnalysisResponse;
     try {
@@ -1196,7 +727,7 @@ async function runChunkedAnalysisJob(
       throw new Error(describeGeminiError(error));
     }
 
-    return buildAnalysisResult(mergedSegments, hasSpeech, analysisResult, blockedChunks);
+    return buildAnalysisResult(mergedSegments, hasSpeech, analysisResult, { blockedChunks });
   } finally {
     await Promise.all(uploadedChunkFiles.map((file) => deleteUploadedFile(ai, file)));
     await Promise.all(uploadedReferences.map((file) => deleteUploadedFile(ai, file)));
@@ -1230,9 +761,7 @@ async function runAnalysisOnlyFromCheckpoint(
     await reportStage(jobId, "AI 요약 생성 중... (STT 결과 재사용)");
     uploadedReferences = await uploadReferenceFiles(ai, apiKey, referenceBlobRefs);
 
-    const bookmarkLines = bookmarks
-      .map((bookmark) => `- [${formatTimestamp(bookmark.atMs)}] ${bookmark.label}`)
-      .join("\n");
+    const bookmarkLines = formatBookmarkLines(bookmarks);
 
     const analysisResult = await callAnalysisWorker(
       ai,
@@ -1242,7 +771,9 @@ async function runAnalysisOnlyFromCheckpoint(
       keywords,
       bookmarkLines,
     );
-    return buildAnalysisResult(checkpoint.segments, checkpoint.hasSpeech, analysisResult, checkpoint.blockedChunks);
+    return buildAnalysisResult(checkpoint.segments, checkpoint.hasSpeech, analysisResult, {
+      blockedChunks: checkpoint.blockedChunks,
+    });
   } catch (error) {
     console.error("[transcribe-and-summarize] checkpoint-resumed analysis worker failed", {
       model: MODEL,
@@ -1272,7 +803,7 @@ async function runAnalysisJob(
   slideThumbnails: IncomingSlideThumbnail[],
   audioChunks: AudioChunkRef[],
 ): Promise<AnalysisResult> {
-  const checkpoint = await readSttCheckpoint(sessionId);
+  const checkpoint = await readSttCheckpoint(sessionId, "gemini");
   if (checkpoint) {
     return runAnalysisOnlyFromCheckpoint(apiKey, jobId, checkpoint, referenceBlobRefs, bookmarks, keywords, slideThumbnails);
   }
@@ -1336,7 +867,7 @@ export async function POST(request: Request) {
     audioChunks.push({ ...ref, startMs });
   }
   audioChunks.sort((a, b) => a.startMs - b.startMs);
-  if (!audioBlobRef && audioChunks.length === 0 && !(await readSttCheckpoint(sessionId))) {
+  if (!audioBlobRef && audioChunks.length === 0 && !(await readSttCheckpoint(sessionId, "gemini"))) {
     return NextResponse.json(
       { error: "오디오 파일 업로드 정보가 전달되지 않았습니다. 파일을 다시 첨부해주세요." },
       { status: 400 },
@@ -1386,7 +917,7 @@ export async function POST(request: Request) {
       // on THIS attempt — now that the whole job has succeeded, it's dead
       // weight (and could otherwise cause a much later, unrelated re-analyze
       // of this same session to wrongly skip STT against a stale script).
-      await deleteSttCheckpoint(sessionId);
+      await deleteSttCheckpoint(sessionId, "gemini");
     } catch (error) {
       // Covers every error this route's own code can throw and catch —
       // Gemini failures, upload failures, all already
@@ -1425,7 +956,7 @@ export async function GET(request: Request) {
   // audio re-upload entirely on retry (see components/RecordingDetailView.tsx).
   const checkpointFor = url.searchParams.get("checkpointFor");
   if (checkpointFor) {
-    const checkpoint = await readSttCheckpoint(checkpointFor);
+    const checkpoint = await readSttCheckpoint(checkpointFor, "gemini");
     return NextResponse.json({ hasCheckpoint: checkpoint !== null });
   }
 

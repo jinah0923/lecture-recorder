@@ -461,6 +461,11 @@ export function ReviewPanel({
           </div>
         ) : (
           <>
+            {aiResult.engine === "openai" && (
+              <p className="mb-3 break-words rounded-lg bg-indigo-50 px-3 py-2 text-xs text-indigo-700 dark:bg-indigo-950/40 dark:text-indigo-300">
+                🤖 직접 선택한 OpenAI 엔진(Whisper-1 음성 인식 · GPT 강의노트)으로 분석한 노트입니다.
+              </p>
+            )}
             {aiResult.blockedChunks && aiResult.blockedChunks.length > 0 && (
               <p className="mb-3 break-words rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
                 ⚠️ {describeBlockedChunks(aiResult.blockedChunks)} 이 노트는 그 구간을 제외한 나머지 녹음으로 작성되었습니다.

@@ -11,8 +11,10 @@ import { ReattachAudioPrompt } from "@/components/ReattachAudioPrompt";
 import { ReferenceDocDropzone } from "@/components/ReferenceDocDropzone";
 import { ReviewPanel } from "@/components/ReviewPanel";
 import {
+  OPENAI_MAX_UNSPLIT_BYTES,
   POLL_TIMEOUT_MESSAGE,
   checkSttCheckpoint,
+  fetchOpenAiEngineStatus,
   clearStoredJobId,
   getStoredJobId,
   pollJobUntilDone,
@@ -34,11 +36,12 @@ import {
 import { formatDateTime, formatFileSize } from "@/lib/format";
 import type { UploadedBlobRef } from "@/lib/blobUpload";
 import { uploadFileToBlob } from "@/lib/blobUpload";
-import { buildSlideThumbnails, extractPdfSlides } from "@/lib/pdfSlides";
+import { buildSlideThumbnails, extractPdfSlides, extractPdfText } from "@/lib/pdfSlides";
 import { pushLocalSessions } from "@/lib/sync";
 import { extractChangedTerms, replaceAllOccurrences } from "@/lib/termDiff";
 import type {
   AiResult,
+  AnalysisEngine,
   Bookmark,
   ChecklistItem,
   LectureSession,
@@ -47,6 +50,31 @@ import type {
   SlideImage,
   TranscriptSegment,
 } from "@/lib/types";
+
+// Per-viewer convenience only — which engine the picker starts on.
+const ENGINE_STORAGE_KEY = "lecture-recorder:analysisEngine";
+
+function readPreferredEngine(): AnalysisEngine | null {
+  try {
+    const saved = window.localStorage.getItem(ENGINE_STORAGE_KEY);
+    return saved === "openai" || saved === "gemini" ? saved : null;
+  } catch {
+    return null;
+  }
+}
+
+function savePreferredEngine(engine: AnalysisEngine): void {
+  try {
+    window.localStorage.setItem(ENGINE_STORAGE_KEY, engine);
+  } catch {
+    // Private mode / blocked storage — the choice just isn't remembered.
+  }
+}
+
+const ENGINE_OPTIONS: { value: AnalysisEngine; label: string }[] = [
+  { value: "gemini", label: "Google Gemini" },
+  { value: "openai", label: "OpenAI" },
+];
 
 const PROGRESS_STAGES = ["서버 분석 요청 중...", "음성 인식(STT) 진행 중...", "AI 요약 생성 중..."];
 // Matches TranscriptPanel's own debounce so a script edit lands in IndexedDB
@@ -116,6 +144,12 @@ export function RecordingDetailView({
   // written during that very attempt's STT phase before it failed at
   // stage 2).
   const [hasSttCheckpoint, setHasSttCheckpoint] = useState(false);
+  // Which pipeline handleAnalyze uses — picked by the user (never switched
+  // automatically). openAiConfigured: null until the server says whether
+  // it has OPENAI_API_KEY.
+  const [engine, setEngine] = useState<AnalysisEngine>("gemini");
+  const [openAiConfigured, setOpenAiConfigured] = useState<boolean | null>(null);
+  const effectiveEngine: AnalysisEngine = engine === "openai" && openAiConfigured !== false ? "openai" : "gemini";
 
   const [keywords, setKeywords] = useState<string[]>([]);
   const [referenceFileNames, setReferenceFileNames] = useState<string[]>([]);
@@ -229,9 +263,26 @@ export function RecordingDetailView({
   // re-invoke it after an attempt fails (a checkpoint may have just been
   // written during that very attempt, before it failed at stage 2).
   const refreshCheckpointStatus = useCallback(async () => {
-    const has = await checkSttCheckpoint(sessionId);
+    const has = await checkSttCheckpoint(sessionId, effectiveEngine);
     setHasSttCheckpoint(has);
-  }, [sessionId]);
+  }, [sessionId, effectiveEngine]);
+
+  useEffect(() => {
+    const saved = readPreferredEngine();
+    if (saved) setEngine(saved);
+    let cancelled = false;
+    void fetchOpenAiEngineStatus().then(({ configured }) => {
+      if (!cancelled) setOpenAiConfigured(configured);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  function handleEngineChange(next: AnalysisEngine) {
+    setEngine(next);
+    savePreferredEngine(next);
+  }
 
   useEffect(() => {
     if (!hydrated || notFound || aiResult) return;
@@ -437,6 +488,7 @@ export function RecordingDetailView({
           lectureNote: result.lectureNote ?? "",
           checklist: result.checklist ?? [],
           ...(result.blockedChunks?.length ? { blockedChunks: result.blockedChunks } : {}),
+          ...(result.engine === "openai" ? { engine: "openai" as const } : {}),
         };
         setAiResult(nextAiResult);
         // The job succeeded but skipped what Gemini refused — say so right
@@ -537,7 +589,12 @@ export function RecordingDetailView({
         // whole file, so no server-side ffmpeg/disk/memory/duration limit
         // applies (see lib/audioChunking.ts).
         const effectiveDurationMs = durationMs || audio.durationMs;
-        if (shouldChunk(effectiveDurationMs)) {
+        // Whisper (OpenAI engine) takes at most 25MB per file, so a short but
+        // large recording is split for it too.
+        const needsSplit =
+          shouldChunk(effectiveDurationMs) ||
+          (effectiveEngine === "openai" && audio.blob.size > OPENAI_MAX_UNSPLIT_BYTES);
+        if (needsSplit) {
           setAnalyzeProgress("오디오 분할 준비 중...");
           const pieces = await splitAudioInBrowser(
             audio.blob,
@@ -566,17 +623,9 @@ export function RecordingDetailView({
         }
       }
 
-      const referenceBlobs: UploadedBlobRef[] = [];
-      for (let index = 0; index < referenceDocs.length; index++) {
-        const doc = referenceDocs[index];
-        setAnalyzeProgress(`참고자료 업로드 중... (${index + 1}/${referenceDocs.length})`);
-        referenceBlobs.push(await uploadFileToBlob(doc.blob, doc.name, doc.mimeType));
-      }
       if (referenceDocs.length > 0) {
         setReferenceFileNames(referenceDocs.map((doc) => doc.name));
       }
-
-      const slideThumbnails = slideImages.length > 0 ? await buildSlideThumbnails(slideImages) : [];
 
       // From here the actual analysis is an async job on the server (see
       // app/api/transcribe-and-summarize/route.ts) — this request just
@@ -586,16 +635,60 @@ export function RecordingDetailView({
       // reclaiming the tab mid-analysis (the previous SSE-streaming
       // approach was still vulnerable to that: the client connection itself
       // gets suspended by the OS, independent of anything the server does).
-      setAnalyzeProgress("서버 분석 요청 중...");
-      const jobId = await startAnalysisJob({
-        sessionId,
-        audioBlob,
-        audioChunks,
-        referenceBlobs,
-        bookmarks,
-        keywords,
-        slideThumbnails,
-      });
+      let jobId: string;
+      if (effectiveEngine === "openai") {
+        // The OpenAI engine reads reference PDFs/text files as text (labelled
+        // with the same global page numbers as slideImages, so the note's
+        // ![슬라이드 N](slide_N) placeholders still resolve) and only uploads
+        // image references.
+        const referenceTexts: Array<{ fileName: string; text: string }> = [];
+        const referenceImages: UploadedBlobRef[] = [];
+        let pageOffset = 0;
+        for (let index = 0; index < referenceDocs.length; index++) {
+          const doc = referenceDocs[index];
+          setAnalyzeProgress(`참고자료 준비 중... (${index + 1}/${referenceDocs.length})`);
+          if (isPdfDocument(doc)) {
+            const pages = await extractPdfText(doc.blob);
+            const text = pages
+              .map((pageText, pageIndex) => `[슬라이드 ${pageOffset + pageIndex + 1}]\n${pageText || "(텍스트 없음)"}`)
+              .join("\n\n");
+            referenceTexts.push({ fileName: doc.name, text });
+            pageOffset += pages.length;
+          } else if (doc.mimeType.startsWith("image/")) {
+            referenceImages.push(await uploadFileToBlob(doc.blob, doc.name, doc.mimeType));
+          } else {
+            referenceTexts.push({ fileName: doc.name, text: await doc.blob.text() });
+          }
+        }
+        setAnalyzeProgress("서버 분석 요청 중...");
+        jobId = await startAnalysisJob("openai", {
+          sessionId,
+          audioBlob,
+          audioChunks,
+          referenceTexts,
+          referenceImages,
+          bookmarks,
+          keywords,
+        });
+      } else {
+        const referenceBlobs: UploadedBlobRef[] = [];
+        for (let index = 0; index < referenceDocs.length; index++) {
+          const doc = referenceDocs[index];
+          setAnalyzeProgress(`참고자료 업로드 중... (${index + 1}/${referenceDocs.length})`);
+          referenceBlobs.push(await uploadFileToBlob(doc.blob, doc.name, doc.mimeType));
+        }
+        const slideThumbnails = slideImages.length > 0 ? await buildSlideThumbnails(slideImages) : [];
+        setAnalyzeProgress("서버 분석 요청 중...");
+        jobId = await startAnalysisJob("gemini", {
+          sessionId,
+          audioBlob,
+          audioChunks,
+          referenceBlobs,
+          bookmarks,
+          keywords,
+          slideThumbnails,
+        });
+      }
       // Persisted before polling starts, not after — if the tab gets
       // backgrounded or closed between these two lines, the job is still
       // recoverable on next open (see the mount effect below).
@@ -869,6 +962,49 @@ export function RecordingDetailView({
 
       {!aiResult && (
         <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <span id="analysis-engine-label" className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+              분석 엔진
+            </span>
+            <div
+              role="radiogroup"
+              aria-labelledby="analysis-engine-label"
+              className="inline-flex rounded-full border border-slate-200 bg-slate-100 p-0.5 dark:border-zinc-700 dark:bg-zinc-800"
+            >
+              {ENGINE_OPTIONS.map((option) => {
+                const selected = effectiveEngine === option.value;
+                const unavailable = option.value === "openai" && openAiConfigured === false;
+                return (
+                  <button
+                    key={option.value}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    disabled={isAnalyzing || unavailable}
+                    onClick={() => handleEngineChange(option.value)}
+                    className={`rounded-full px-3 py-1 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                      selected
+                        ? "bg-white text-indigo-600 shadow-sm dark:bg-zinc-900 dark:text-indigo-400"
+                        : "text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
+                    }`}
+                  >
+                    {option.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          {effectiveEngine === "openai" && (
+            <p className="mb-3 break-words text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">
+              OpenAI Whisper-1(음성 인식)와 GPT(강의노트 작성)로만 처리하며 Gemini는 호출하지 않아요. 참고 PDF는 이미지 대신
+              추출한 텍스트로 전달되고, 사용량만큼 OpenAI 요금이 청구돼요.
+            </p>
+          )}
+          {openAiConfigured === false && (
+            <p className="mb-3 break-words text-[11px] text-zinc-400 dark:text-zinc-500">
+              OpenAI 엔진을 쓰려면 서버에 OPENAI_API_KEY를 설정해야 해요.
+            </p>
+          )}
           <button
             type="button"
             onClick={handleAnalyze}

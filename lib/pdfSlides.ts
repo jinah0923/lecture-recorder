@@ -64,6 +64,31 @@ export async function extractPdfSlides(file: Blob): Promise<SlideImage[]> {
   return slides;
 }
 
+// Each page's text, in page order — what the OpenAI engine reads in place of
+// slide images (see app/api/transcribe-openai). Empty string for a page
+// with no text layer (a scanned page).
+export async function extractPdfText(file: Blob): Promise<string[]> {
+  const pdfjsLib = await loadPdfjs();
+  const loadingTask = pdfjsLib.getDocument({ data: await file.arrayBuffer() });
+  const pdf = await loadingTask.promise;
+  const pages: string[] = [];
+  try {
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
+      const page = await pdf.getPage(pageNumber);
+      const content = await page.getTextContent();
+      let text = "";
+      for (const item of content.items) {
+        if (!("str" in item)) continue;
+        text += item.str + (item.hasEOL ? "\n" : " ");
+      }
+      pages.push(text.replace(/[ \t]+\n/g, "\n").replace(/[ \t]{2,}/g, " ").trim());
+    }
+  } finally {
+    await loadingTask.destroy();
+  }
+  return pages;
+}
+
 function downscaleDataUrl(dataUrl: string, targetWidth: number, quality: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const img = new Image();

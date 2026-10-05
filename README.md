@@ -39,6 +39,15 @@ Next.js 라우트는 `/` 하나뿐이며, 아래 3단계는 모두 클라이언�
 GEMINI_API_KEY=your-api-key-here
 ```
 
+   분석 화면에서 **OpenAI** 엔진(Whisper-1 음성 인식 + GPT 강의노트)을 고를 수 있게 하려면 OpenAI 키도 추가합니다. 없으면 OpenAI 선택지만 비활성화됩니다.
+
+```bash
+OPENAI_API_KEY=your-openai-api-key
+# 선택: 강의노트 모델과 최대 출력 토큰 (기본값 gpt-4o-mini / 16384)
+# OPENAI_ANALYSIS_MODEL=gpt-4o-mini
+# OPENAI_ANALYSIS_MAX_TOKENS=16384
+```
+
 3. 의존성 설치 후 개발 서버를 실행합니다.
 
 ```bash
