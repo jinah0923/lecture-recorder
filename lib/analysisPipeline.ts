@@ -206,6 +206,18 @@ export function normalizeSttSegments(rawScript: unknown): CheckpointSegment[] {
   });
 }
 
+// An already-saved transcript (AiResult.transcript, in ms) back into the
+// segment shape the analysis step reads — for re-analysis without STT
+// (app/api/merge-material). Blocked-stretch placeholders keep their marker.
+export function transcriptToCheckpointSegments(transcript: TranscriptSegment[]): CheckpointSegment[] {
+  return transcript.map((segment) => ({
+    startSeconds: segment.startMs / 1000,
+    endSeconds: segment.endMs / 1000,
+    text: segment.text,
+    ...(segment.source === "blocked" ? { source: "blocked" as const } : {}),
+  }));
+}
+
 // The timestamped-line format every analysis worker reads the transcript in.
 export function segmentsToTranscriptText(segments: CheckpointSegment[]): string {
   return segments.map((s) => `[${formatTimestamp(s.startSeconds * 1000)}] ${s.text}`).join("\n");

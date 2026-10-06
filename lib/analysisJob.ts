@@ -177,6 +177,69 @@ export async function startAnalysisJob(
   return data.jobId;
 }
 
+// "자료 추가해서 다시 분석" (app/api/merge-material): new reference material
+// merged into an already-analyzed session's existing transcript — no audio.
+// `transcript` is only a fallback; the server reads the cloud copy when the
+// user is signed in.
+export type MergeMaterialPayload = {
+  sessionId: string;
+  referenceBlobs: BlobRefPayload[];
+  slideThumbnails: unknown[];
+  keywords: string[];
+  bookmarks: unknown[];
+  transcript: TranscriptSegment[];
+};
+
+export async function startMergeMaterialJob(payload: MergeMaterialPayload): Promise<string> {
+  const response = await fetch("/api/merge-material", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(await readErrorMessage(response, "자료 병합 분석 요청에 실패했습니다."));
+  }
+  const data = (await response.json()) as { jobId?: string };
+  if (!data.jobId) throw new Error("작업 ID를 받지 못했습니다.");
+  return data.jobId;
+}
+
+// A merge job in flight for a session, with the names of the files it
+// merges (to record on the session once it finishes) — kept separately from
+// the analysis job id, since a merge runs on a session that already has a
+// result. Lets a reloaded or reopened tab pick the job back up.
+const MERGE_JOB_KEY_PREFIX = "lecture-recorder:mergeJob:";
+export type StoredMergeJob = { jobId: string; fileNames: string[] };
+
+export function getStoredMergeJob(sessionId: string): StoredMergeJob | null {
+  try {
+    const raw = window.localStorage.getItem(MERGE_JOB_KEY_PREFIX + sessionId);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<StoredMergeJob>;
+    return typeof parsed.jobId === "string" && Array.isArray(parsed.fileNames)
+      ? { jobId: parsed.jobId, fileNames: parsed.fileNames.filter((name): name is string => typeof name === "string") }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function setStoredMergeJob(sessionId: string, job: StoredMergeJob): void {
+  try {
+    window.localStorage.setItem(MERGE_JOB_KEY_PREFIX + sessionId, JSON.stringify(job));
+  } catch {
+    // Without storage the job just can't be resumed after a reload.
+  }
+}
+
+export function clearStoredMergeJob(sessionId: string): void {
+  try {
+    window.localStorage.removeItem(MERGE_JOB_KEY_PREFIX + sessionId);
+  } catch {
+    // Nothing to clear.
+  }
+}
+
 // Checked before analysis even starts (RecordingDetailView's mount effect
 // and its post-failure recheck) — drives the "이어서 분석 재개하기" button
 // label and lets handleAnalyze skip re-uploading the audio file entirely

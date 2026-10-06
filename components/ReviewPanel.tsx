@@ -33,6 +33,10 @@ type ReviewPanelProps = {
   onSaveLectureNoteNow: (nextLectureNote: string) => Promise<void>;
   onUpdateTranscript: (nextTranscript: TranscriptSegment[]) => void;
   onSegmentCommitted?: (oldText: string, newText: string) => void;
+  /** "📄 자료 추가해서 다시 분석": files the user picked, for the caller to confirm and merge. */
+  onMergeMaterial?: (files: File[]) => void;
+  /** Progress text while a merge re-analysis runs; null when idle. */
+  mergeProgress?: string | null;
   /** Page number -> cached slide image, for `![슬라이드 N](slide_N)` placeholders. */
   slideImages?: Map<number, string>;
 };
@@ -133,9 +137,19 @@ export function ReviewPanel({
   onSaveLectureNoteNow,
   onUpdateTranscript,
   onSegmentCommitted,
+  onMergeMaterial,
+  mergeProgress = null,
   slideImages,
 }: ReviewPanelProps) {
   const [summaryCopyLabel, setSummaryCopyLabel] = useState("클립보드 복사");
+  const mergeInputRef = useRef<HTMLInputElement>(null);
+
+  function handleMergeFilesPicked(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+    // Cleared so picking the same file again still fires onChange.
+    event.target.value = "";
+    if (files.length > 0) onMergeMaterial?.(files);
+  }
   const [noteCopyLabel, setNoteCopyLabel] = useState("클립보드 복사");
 
   // Manual-edit mode for the lecture note — operates on aiResult.lectureNote
@@ -425,13 +439,46 @@ export function ReviewPanel({
               <button
                 type="button"
                 onClick={startEditingNote}
-                className="rounded-full border border-slate-200 px-3 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                disabled={!!mergeProgress}
+                className="rounded-full border border-slate-200 px-3 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
               >
                 ✏️ 노트 직접 수정
               </button>
             )}
+            {onMergeMaterial && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => mergeInputRef.current?.click()}
+                  disabled={!!mergeProgress || isEditingNote}
+                  title="녹음은 다시 분석하지 않고, 기존 스크립트에 교안·교재를 합쳐 노트를 새로 만듭니다"
+                  className="rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700 transition hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-indigo-900 dark:bg-indigo-950/40 dark:text-indigo-300 dark:hover:bg-indigo-900/50"
+                >
+                  📄 자료 추가해서 다시 분석
+                </button>
+                <input
+                  ref={mergeInputRef}
+                  type="file"
+                  accept=".pdf,application/pdf,image/*"
+                  multiple
+                  onChange={handleMergeFilesPicked}
+                  className="hidden"
+                  aria-hidden="true"
+                  tabIndex={-1}
+                />
+              </>
+            )}
           </div>
         </div>
+        {mergeProgress && (
+          <p
+            role="status"
+            className="mb-3 flex items-center gap-2 rounded-lg bg-indigo-50 px-3 py-2 text-xs font-medium text-indigo-700 dark:bg-indigo-950/40 dark:text-indigo-300"
+          >
+            <span className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-indigo-300 border-t-indigo-700 dark:border-indigo-800 dark:border-t-indigo-300" />
+            {mergeProgress}
+          </p>
+        )}
         {isEditingNote ? (
           <div className="flex flex-col gap-2">
             <textarea

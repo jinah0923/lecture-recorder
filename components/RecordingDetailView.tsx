@@ -6,6 +6,7 @@ import { BookmarkManager } from "@/components/BookmarkManager";
 import { CategoryBadgeSelect } from "@/components/CategoryBadgeSelect";
 import { CollapsibleCard } from "@/components/CollapsibleCard";
 import { KeywordTagInput } from "@/components/KeywordTagInput";
+import { MergeMaterialModal } from "@/components/MergeMaterialModal";
 import { PolicyBlockedModal } from "@/components/PolicyBlockedModal";
 import { ReattachAudioPrompt } from "@/components/ReattachAudioPrompt";
 import { ReferenceDocDropzone } from "@/components/ReferenceDocDropzone";
@@ -14,12 +15,16 @@ import {
   OPENAI_MAX_UNSPLIT_BYTES,
   POLL_TIMEOUT_MESSAGE,
   checkSttCheckpoint,
+  clearStoredMergeJob,
   fetchOpenAiEngineStatus,
   clearStoredJobId,
   getStoredJobId,
+  getStoredMergeJob,
   pollJobUntilDone,
   setStoredJobId,
+  setStoredMergeJob,
   startAnalysisJob,
+  startMergeMaterialJob,
 } from "@/lib/analysisJob";
 import { probeAudioDurationMs } from "@/lib/audio";
 import { shouldChunk, splitAudioInBrowser } from "@/lib/audioChunking";
@@ -51,6 +56,13 @@ import type {
   TranscriptSegment,
   UserApprovedFallbackReason,
 } from "@/lib/types";
+
+const MERGE_PROGRESS_TEXT = "기존 녹음 스크립트와 새 자료를 병합하여 단권화 중입니다...";
+const MAX_MERGE_FILES = 5;
+
+function isPdfFile(file: File): boolean {
+  return file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+}
 
 const PROGRESS_STAGES = ["서버 분석 요청 중...", "음성 인식(STT) 진행 중...", "AI 요약 생성 중..."];
 // Matches TranscriptPanel's own debounce so a script edit lands in IndexedDB
@@ -303,6 +315,12 @@ export function RecordingDetailView({
       aiResult,
     ],
   );
+
+  // Always the newest buildSessionSnapshot, for long async flows (a merge
+  // re-analysis can run for minutes) that must save the session as it is
+  // when they finish, not as it was when they started.
+  const latestSnapshotRef = useRef(buildSessionSnapshot);
+  latestSnapshotRef.current = buildSessionSnapshot;
 
   // Persist metadata edits — never the audio blob, preserving createdAt.
   // Debounced so rapid edits (e.g. typing in the title) don't trigger an
@@ -724,6 +742,162 @@ export function RecordingDetailView({
       </div>
     ) : null;
 
+  // ---- "📄 자료 추가해서 다시 분석" (app/api/merge-material) ----
+  // Rebuilds the note from the existing transcript plus newly picked
+  // material; the recording itself is never re-analyzed.
+  const [pendingMergeFiles, setPendingMergeFiles] = useState<File[] | null>(null);
+  const [mergeProgress, setMergeProgress] = useState<string | null>(null);
+  const isMergingRef = useRef(false);
+
+  const showSyncToast = useCallback((message: string, ms: number) => {
+    setSyncToast(message);
+    if (syncToastTimerRef.current) window.clearTimeout(syncToastTimerRef.current);
+    syncToastTimerRef.current = window.setTimeout(() => setSyncToast(null), ms);
+  }, []);
+
+  function handleMergeMaterial(files: File[]) {
+    if (files.length > MAX_MERGE_FILES) {
+      showSyncToast(`자료는 한 번에 최대 ${MAX_MERGE_FILES}개까지 추가할 수 있어요.`, 4000);
+      return;
+    }
+    if (files.some((file) => !isPdfFile(file) && !file.type.startsWith("image/"))) {
+      showSyncToast("PDF 또는 이미지 파일만 추가할 수 있어요.", 4000);
+      return;
+    }
+    setPendingMergeFiles(files);
+  }
+
+  // Waits for a merge job and applies its result. Also what resumes a merge
+  // after a reload (see the effect below), hence the stored file names.
+  const pollMergeJob = useCallback(
+    async (jobId: string, fileNames: string[]) => {
+      if (isMergingRef.current) return;
+      isMergingRef.current = true;
+      setMergeProgress(MERGE_PROGRESS_TEXT);
+      try {
+        const result = await pollJobUntilDone(jobId, (status) => {
+          if (status.status === "processing" && status.stage) setMergeProgress(status.stage);
+        });
+        clearStoredMergeJob(sessionId);
+
+        // Only the note, summary and checklist change — the transcript stays
+        // this device's own (possibly hand-edited) copy. A checklist item that
+        // comes back word-for-word keeps its ✓. The note is now Gemini's, so
+        // any OpenAI marker from an earlier analysis no longer applies.
+        let nextAiResult: AiResult | null = null;
+        setAiResult((current) => {
+          if (!current) return current;
+          const doneByText = new Map(current.checklist.map((item) => [item.text, item.done]));
+          const merged: AiResult = {
+            ...current,
+            summary: result.summary ?? current.summary,
+            lectureNote: result.lectureNote ?? current.lectureNote,
+            checklist: (result.checklist ?? []).map((item) => ({ ...item, done: doneByText.get(item.text) ?? false })),
+          };
+          delete merged.engine;
+          delete merged.userApprovedFallback;
+          nextAiResult = merged;
+          return merged;
+        });
+        if (!nextAiResult) return;
+        let nextReferenceNames: string[] = [];
+        setReferenceFileNames((current) => {
+          nextReferenceNames = Array.from(new Set([...current, ...fileNames]));
+          return nextReferenceNames;
+        });
+
+        await saveSession(latestSnapshotRef.current({ aiResult: nextAiResult, referenceFileNames: nextReferenceNames }));
+        onSessionSaved();
+        await pushLocalSessions().catch(() => {});
+        showSyncToast("✓ 새 자료를 반영해 강의노트를 다시 만들었습니다.", 4000);
+      } catch (error) {
+        clearStoredMergeJob(sessionId);
+        const message = error instanceof Error ? error.message : "자료 병합 분석에 실패했습니다.";
+        const blocked = parseProhibitedContentError(message);
+        if (blocked) {
+          setPolicyBlock(blocked);
+        } else {
+          setPollFailureToast(`자료 병합 분석 실패: ${message}`);
+          if (pollFailureToastTimerRef.current) window.clearTimeout(pollFailureToastTimerRef.current);
+          pollFailureToastTimerRef.current = window.setTimeout(() => setPollFailureToast(null), 10000);
+        }
+      } finally {
+        isMergingRef.current = false;
+        setMergeProgress(null);
+      }
+    },
+    [sessionId, onSessionSaved, showSyncToast],
+  );
+
+  async function runMerge(files: File[]) {
+    setPendingMergeFiles(null);
+    if (!aiResult || mergeProgress) return;
+    try {
+      // The server reads the transcript from the cloud copy when signed in —
+      // make sure that copy is this device's latest first.
+      setMergeProgress("최신 노트를 클라우드에 저장하는 중...");
+      await pushLocalSessions().catch(() => {});
+
+      // New PDF pages become slide images numbered after the existing ones,
+      // so the new note's ![슬라이드 N](slide_N) placeholders resolve here.
+      const pdfFiles = files.filter(isPdfFile);
+      let allSlides = slideImages;
+      if (pdfFiles.length > 0) {
+        setMergeProgress("새 자료의 슬라이드 이미지를 만드는 중...");
+        let pageOffset = slideImages.reduce((max, slide) => Math.max(max, slide.page), 0);
+        const added: SlideImage[] = [];
+        for (const pdf of pdfFiles) {
+          const slides = await extractPdfSlides(pdf).catch(() => [] as SlideImage[]);
+          for (const slide of slides) added.push({ page: slide.page + pageOffset, dataUrl: slide.dataUrl });
+          pageOffset += slides.length;
+        }
+        if (added.length > 0) {
+          allSlides = [...slideImages, ...added];
+          setSlideImages(allSlides);
+          await saveSlideImages(sessionId, allSlides);
+        }
+      }
+
+      const referenceBlobs: UploadedBlobRef[] = [];
+      for (let index = 0; index < files.length; index++) {
+        const file = files[index];
+        setMergeProgress(`새 자료 업로드 중... (${index + 1}/${files.length})`);
+        referenceBlobs.push(
+          await uploadFileToBlob(file, file.name, file.type || (isPdfFile(file) ? "application/pdf" : "image/jpeg")),
+        );
+      }
+      const slideThumbnails = allSlides.length > 0 ? await buildSlideThumbnails(allSlides) : [];
+
+      setMergeProgress(MERGE_PROGRESS_TEXT);
+      const jobId = await startMergeMaterialJob({
+        sessionId,
+        referenceBlobs,
+        slideThumbnails,
+        keywords,
+        bookmarks,
+        transcript: aiResult.transcript,
+      });
+      const fileNames = files.map((file) => file.name);
+      setStoredMergeJob(sessionId, { jobId, fileNames });
+      await pollMergeJob(jobId, fileNames);
+    } catch (error) {
+      console.error("자료 병합 분석 시작 실패:", error);
+      setMergeProgress(null);
+      const message = error instanceof Error ? error.message : "자료 병합 분석을 시작하지 못했습니다.";
+      setPollFailureToast(`자료 병합 분석 실패: ${message}`);
+      if (pollFailureToastTimerRef.current) window.clearTimeout(pollFailureToastTimerRef.current);
+      pollFailureToastTimerRef.current = window.setTimeout(() => setPollFailureToast(null), 10000);
+    }
+  }
+
+  // Picks a merge back up after a reload or reopen (see setStoredMergeJob).
+  const hasAiResult = !!aiResult;
+  useEffect(() => {
+    if (!hydrated || notFound || !hasAiResult) return;
+    const stored = getStoredMergeJob(sessionId);
+    if (stored) void pollMergeJob(stored.jobId, stored.fileNames);
+  }, [hydrated, notFound, hasAiResult, sessionId, pollMergeJob]);
+
   // Recovery: if this session has a job id left over in localStorage (set
   // by handleAnalyze above, cleared once resumeJobPolling reaches a
   // terminal state), resume polling for it on mount — this is what lets a
@@ -920,6 +1094,8 @@ export function RecordingDetailView({
           onUpdateTranscript={updateTranscript}
           onSegmentCommitted={handleSegmentCommitted}
           slideImages={slideImagesMap}
+          onMergeMaterial={handleMergeMaterial}
+          mergeProgress={mergeProgress}
         />
       )}
 
@@ -1040,6 +1216,14 @@ export function RecordingDetailView({
             {pollFailureToast}
           </p>
         </div>
+      )}
+
+      {pendingMergeFiles && (
+        <MergeMaterialModal
+          files={pendingMergeFiles}
+          onConfirm={() => void runMerge(pendingMergeFiles)}
+          onCancel={() => setPendingMergeFiles(null)}
+        />
       )}
 
       {policyBlock && (
