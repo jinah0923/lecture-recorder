@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AudioPlayer } from "@/components/AudioPlayer";
-import { BookmarkPanel } from "@/components/BookmarkPanel";
+import { BookmarkManager } from "@/components/BookmarkManager";
 import { CategoryBadgeSelect } from "@/components/CategoryBadgeSelect";
 import { CollapsibleCard } from "@/components/CollapsibleCard";
 import { KeywordTagInput } from "@/components/KeywordTagInput";
@@ -419,6 +419,11 @@ export function RecordingDetailView({
     if (!el) return;
     el.currentTime = ms / 1000;
     void el.play();
+  }, []);
+
+  const getCurrentTimeMs = useCallback(() => {
+    const el = audioRef.current;
+    return el ? Math.floor(el.currentTime * 1000) : null;
   }, []);
 
   // Guards against resumeJobPolling starting a second, concurrent poll loop
@@ -1010,15 +1015,16 @@ export function RecordingDetailView({
       )}
 
       <section className="rounded-2xl border border-slate-200 bg-slate-50 p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-        <BookmarkPanel
+        {/* Bookmark edits go through setBookmarks like any other session
+            field: the autosave effect writes them to IndexedDB, and
+            onSessionSaved pushes the session to the cloud when signed in. */}
+        <BookmarkManager
           bookmarks={bookmarks}
-          elapsedMs={0}
-          isRecording={false}
-          onBookmarksChange={() => {}}
+          onBookmarksChange={setBookmarks}
           onSeek={seekTo}
-          allowAdd={false}
-          variant="cards"
-          emptyText="저장된 북마크 없음"
+          getCurrentTimeMs={getCurrentTimeMs}
+          canPlay={!!(audioUrl && localAudio)}
+          durationMs={durationMs}
         />
       </section>
 
