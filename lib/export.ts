@@ -7,6 +7,29 @@ export async function copyToClipboard(text: string): Promise<boolean> {
   }
 }
 
+// Puts both flavors on the clipboard: `html` for rich editors (Notion, Docs,
+// Word read it and keep bold, highlights, headings, lists and tables) and
+// `text` for everything else. Falls back to plain text alone where the
+// browser can't write HTML (no ClipboardItem, or the write is refused).
+// ClipboardItem gets Blob promises so the write starts inside the click —
+// Safari rejects clipboard writes that begin after an await.
+export async function copyRichToClipboard(html: string, text: string): Promise<boolean> {
+  if (typeof ClipboardItem !== "undefined" && navigator.clipboard?.write) {
+    try {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/html": Promise.resolve(new Blob([html], { type: "text/html" })),
+          "text/plain": Promise.resolve(new Blob([text], { type: "text/plain" })),
+        }),
+      ]);
+      return true;
+    } catch {
+      // fall through to plain text
+    }
+  }
+  return copyToClipboard(text);
+}
+
 export function downloadTextFile(filename: string, content: string, mimeType: string) {
   downloadBlob(filename, new Blob([content], { type: mimeType }));
 }

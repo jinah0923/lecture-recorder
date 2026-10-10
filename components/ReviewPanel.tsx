@@ -8,7 +8,8 @@ import { NotionExportModal } from "@/components/NotionExportModal";
 import { PdfExportModal } from "@/components/PdfExportModal";
 import { TranscriptPanel } from "@/components/TranscriptPanel";
 import { buildDeepDiveImageProxyUrl, uploadFileToBlob } from "@/lib/blobUpload";
-import { copyToClipboard, downloadTextFile } from "@/lib/export";
+import { markdownToClipboardHtml } from "@/lib/clipboardHtml";
+import { copyRichToClipboard, downloadTextFile } from "@/lib/export";
 import { describeBlockedChunks } from "@/lib/geminiMessages";
 import { stripMarkTags } from "@/lib/inlineMarkdown";
 import { toNotionPasteMarkdown } from "@/lib/noteBlocks";
@@ -224,8 +225,12 @@ export function ReviewPanel({
     };
   }, [expandImage]);
 
+  // HTML (bold, highlights, structure) plus the markdown as plain text — see
+  // copyRichToClipboard. Pasting only the markdown left ** and <mark> as
+  // literal text in Notion.
   async function handleCopySummary() {
-    const ok = await copyToClipboard(buildSummaryExportContent(aiResult));
+    const markdown = buildSummaryExportContent(aiResult);
+    const ok = await copyRichToClipboard(markdownToClipboardHtml(markdown), markdown);
     setSummaryCopyLabel(ok ? "복사됨!" : "복사 실패");
     window.setTimeout(() => setSummaryCopyLabel("클립보드 복사"), 1500);
   }
@@ -239,7 +244,8 @@ export function ReviewPanel({
   }
 
   async function handleCopyNote() {
-    const ok = await copyToClipboard(buildLectureNoteExportContent(aiResult));
+    const markdown = buildLectureNoteExportContent(aiResult);
+    const ok = await copyRichToClipboard(markdownToClipboardHtml(markdown), markdown);
     setNoteCopyLabel(ok ? "복사됨!" : "복사 실패");
     window.setTimeout(() => setNoteCopyLabel("클립보드 복사"), 1500);
   }
