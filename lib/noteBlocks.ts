@@ -2,6 +2,8 @@
 // (lib/markdown.tsx, lib/pdfExport.ts, app/api/export-to-notion/route.ts),
 // alongside lib/inlineMarkdown.ts for inline formatting.
 
+import { protectMath, splitMathPlaceholders } from "@/lib/inlineMath";
+
 // Formula/equation lines — the prompt (EQUATION_FORMAT_RULE in
 // lib/promptRules.ts) has the model write each formula as its own unbroken
 // `> 🧮 자산 = 부채 + 자본` line, so it renders as a standalone formula block
@@ -97,6 +99,22 @@ export function buildListTree(items: ListLine[]): ListNode[] {
   return roots;
 }
 
+// Formula delimiters as Notion's paste understands them: $...$ inline and
+// $$...$$ display. \(...\) / \[...\] (which the AI sometimes writes and the
+// app renders) are rewritten; the formula text itself, and anything that
+// isn't a formula ("$5와 $10"), is left exactly as written.
+function toDollarMath(line: string): string {
+  const { text, spans } = protectMath(line);
+  if (spans.length === 0) return line;
+  return splitMathPlaceholders(text)
+    .map((piece) => {
+      if (typeof piece === "string") return piece;
+      const { tex, display } = spans[piece];
+      return display ? `$$${tex}$$` : `$${tex}$`;
+    })
+    .join("");
+}
+
 // The note as Notion's markdown paste expects it: nested list items indented
 // by exactly 4 spaces per level (Notion flattens 2-space indents), and "•"
 // bullets — which the in-app renderer accepts but markdown doesn't — turned
@@ -109,11 +127,19 @@ export function toNotionPasteMarkdown(markdown: string): string {
   let inFence = false;
   for (const rawLine of markdown.split("\n")) {
     if (isCodeFence(rawLine)) inFence = !inFence;
-    const item = inFence ? null : parseListLine(rawLine);
+    if (inFence || isCodeFence(rawLine)) {
+      stack.length = 0;
+      out.push(rawLine);
+      continue;
+    }
+    // A multi-line display formula's own "\[" / "\]" lines -> "$$".
+    const trimmed = rawLine.trim();
+    const line = trimmed === "\\[" || trimmed === "\\]" ? rawLine.replace(trimmed, () => "$$") : toDollarMath(rawLine);
+    const item = parseListLine(line);
     if (!item) {
       // Anything that isn't a list line ends the run, same as the renderer.
       stack.length = 0;
-      out.push(rawLine);
+      out.push(line);
       continue;
     }
     while (stack.length > 0 && stack[stack.length - 1] >= item.depth) stack.pop();

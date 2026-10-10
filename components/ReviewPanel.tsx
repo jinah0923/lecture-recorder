@@ -142,6 +142,16 @@ export function ReviewPanel({
   slideImages,
 }: ReviewPanelProps) {
   const [summaryCopyLabel, setSummaryCopyLabel] = useState("클립보드 복사");
+
+  // Selecting rendered text and pressing Ctrl+C would otherwise copy each
+  // formula as a jumble of KaTeX's visible HTML plus its hidden MathML
+  // ("αα…"). KaTeX's copy-tex extension rewrites the copied plain text so each
+  // formula comes out as its $...$ / $$...$$ source. Loaded here, in the
+  // browser only: it registers a document listener as soon as it's imported,
+  // which would break server rendering.
+  useEffect(() => {
+    void import("katex/contrib/copy-tex");
+  }, []);
   const mergeInputRef = useRef<HTMLInputElement>(null);
 
   function handleMergeFilesPicked(event: ChangeEvent<HTMLInputElement>) {
