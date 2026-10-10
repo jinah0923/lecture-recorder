@@ -1,6 +1,11 @@
 "use client";
 
+import katex from "katex";
+// Registers \ce{...} for chemical formulas, as on screen (lib/markdown.tsx).
+import "katex/contrib/mhchem";
 import { tokenizeInline } from "@/lib/inlineMarkdown";
+import { displayMathFenceClose, matchDisplayMathLine, protectMath, splitMathPlaceholders } from "@/lib/inlineMath";
+import type { MathSpan } from "@/lib/inlineMath";
 import {
   buildListTree,
   isCodeFence,
@@ -89,18 +94,35 @@ const PDF_HIGHLIGHT_WORD_STYLE = `${PDF_HIGHLIGHT_STYLE}white-space:nowrap;word-
 // last one, across the full width. Each word (and each gap between words)
 // gets its own span instead: a span that can't wrap sits on one line, so its
 // rectangle is exactly its text. Line breaks still happen at the gaps.
-function highlightHtml(parts: { text: string; bold: boolean }[]): string {
-  const spans = parts.flatMap((part) =>
+// KaTeX HTML for a formula — the same output as on screen. It only looks
+// right with KaTeX's stylesheet and fonts, which exportSectionsToPdf copies
+// into the capture frame (see copyKatexCss / loadKatexFonts).
+function mathHtml(span: MathSpan): string {
+  return katex.renderToString(span.tex, { displayMode: span.display, throwOnError: false, strict: "ignore" });
+}
+
+// Text that may contain formula placeholders (protectMath) -> HTML, with
+// `plain` applied to the ordinary text between formulas.
+function textWithMathHtml(text: string, spans: MathSpan[], plain: (value: string) => string): string {
+  if (spans.length === 0) return plain(text);
+  return splitMathPlaceholders(text)
+    .map((piece) => (typeof piece === "number" ? mathHtml(spans[piece]) : plain(piece)))
+    .join("");
+}
+
+function highlightHtml(parts: { text: string; bold: boolean }[], spans: MathSpan[] = []): string {
+  const spanHtml = parts.flatMap((part) =>
     part.text
       .split(/(\s+)/)
       .filter((token) => token.length > 0)
       .map((token) => {
-        const content = part.bold ? `<strong>${escapeHtml(token)}</strong>` : escapeHtml(token);
+        const inner = textWithMathHtml(token, spans, escapeHtml);
+        const content = part.bold ? `<strong>${inner}</strong>` : inner;
         const style = /^\s+$/.test(token) ? PDF_HIGHLIGHT_STYLE : PDF_HIGHLIGHT_WORD_STYLE;
         return `<span style="${style}">${content}</span>`;
       }),
   );
-  return `<mark style="background:transparent;color:inherit;">${spans.join("")}</mark>`;
+  return `<mark style="background:transparent;color:inherit;">${spanHtml.join("")}</mark>`;
 }
 
 // Invisible break points (zero-width spaces) inside unusually long unbroken
@@ -112,13 +134,17 @@ function softBreakLongRuns(text: string): string {
   return text.replace(LONG_RUN, (run) => (run.match(/.{1,10}/gu) ?? [run]).join("\u200B"));
 }
 
+// LaTeX is swapped for placeholders before the **bold** / <mark> pass and
+// rendered back afterwards, exactly as on screen (lib/markdown.tsx).
 function renderInlineHtml(text: string, options: { softBreakLongRuns?: boolean } = {}): string {
+  const { text: protectedText, spans } = protectMath(text);
   const plain = (value: string) => escapeHtml(options.softBreakLongRuns ? softBreakLongRuns(value) : value);
-  return tokenizeInline(text)
+  const withMath = (value: string) => textWithMathHtml(value, spans, plain);
+  return tokenizeInline(protectedText)
     .map((group) =>
       group.highlight
-        ? highlightHtml(group.parts)
-        : group.parts.map((part) => (part.bold ? `<strong>${plain(part.text)}</strong>` : plain(part.text))).join(""),
+        ? highlightHtml(group.parts, spans)
+        : group.parts.map((part) => (part.bold ? `<strong>${withMath(part.text)}</strong>` : withMath(part.text))).join(""),
     )
     .join("");
 }
@@ -383,6 +409,27 @@ export function renderMarkdownToHtml(markdown: string, slideImages?: Map<number,
       continue;
     }
 
+    // Display formula: a line that is one whole "$$...$$" / "\[...\]", or a
+    // "$$" / "\[" line opening a multi-line one (mirrors lib/markdown.tsx).
+    const displayTex = matchDisplayMathLine(line);
+    const displayFenceClose = displayTex === null ? displayMathFenceClose(line) : null;
+    if (displayTex !== null || displayFenceClose !== null) {
+      flushList();
+      let tex = displayTex ?? "";
+      let next = index + 1;
+      if (displayFenceClose !== null) {
+        const body: string[] = [];
+        while (next < lines.length && lines[next].trim() !== displayFenceClose) body.push(lines[next++]);
+        tex = body.join("\n").trim();
+        next = Math.min(next + 1, lines.length);
+      }
+      if (tex) {
+        blocks.push(`<div ${AVOID_BREAK_ATTR} style="${AVOID_BREAK_STYLE}margin:4px 0;color:${PDF_TEXT_COLOR};">${mathHtml({ tex, display: true })}</div>`);
+      }
+      index = next;
+      continue;
+    }
+
     if (matchEquationLine(line) !== null) {
       const { items, next } = readMatchingRun(lines, index, matchEquationLine);
       blocks.push(renderEquationHtml(items));
@@ -559,6 +606,270 @@ function measureAvoidRanges(root: HTMLElement, scale: number): AvoidRange[] {
   return ranges;
 }
 
+// The capture frame is a blank document on purpose (no Tailwind — its
+// oklch() colors crash html2canvas), so KaTeX's stylesheet has to be brought
+// in explicitly or formulas collapse into overlapping glyphs. These are the
+// KaTeX rules (styles and @font-face) the app already loaded via
+// katex.min.css in app/layout.tsx, copied from the page's own stylesheets;
+// nothing else of the app's CSS comes along.
+function copyKatexCss(): string {
+  const rules: string[] = [];
+  for (const sheet of Array.from(document.styleSheets)) {
+    let sheetRules: CSSRuleList;
+    try {
+      sheetRules = sheet.cssRules;
+    } catch {
+      continue; // cross-origin sheet
+    }
+    for (const rule of Array.from(sheetRules)) {
+      const text = rule.cssText;
+      if (text.includes("katex") || text.includes("KaTeX")) rules.push(text);
+    }
+  }
+  return rules.join("\n");
+}
+
+// Every KaTeX font, loaded before capture. Needed in both documents:
+// html2canvas lays text out in the capture frame but draws it on a canvas
+// that belongs to the app's own document, and an unloaded font silently
+// falls back (wrong glyph widths, overlapping symbols).
+// ---- Formulas as images -----------------------------------------------------
+// html2canvas draws text with its own renderer, which gets KaTeX's stacked
+// layout wrong — fraction bars land on the numerator and subscripts on the
+// baseline — even with the right stylesheet and fonts. So each formula is
+// drawn by the browser itself instead: serialized into an SVG
+// <foreignObject> with the KaTeX CSS and the fonts it uses inlined, rendered
+// to a PNG, and swapped in for the formula in the capture frame, where
+// html2canvas just copies the image. A browser that won't draw a
+// foreignObject into a readable canvas (some Safari versions) keeps the
+// html2canvas rendering instead of failing the export.
+
+const FORMULA_IMAGE_PAD_PX = 3;
+const fontDataUrlCache = new Map<string, Promise<string | null>>();
+
+function fetchAsDataUrl(url: string): Promise<string | null> {
+  let cached = fontDataUrlCache.get(url);
+  if (!cached) {
+    cached = fetch(url)
+      .then((response) => (response.ok ? response.blob() : null))
+      .then(
+        (blob) =>
+          blob &&
+          new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result));
+            reader.onerror = () => reject(reader.error);
+            reader.readAsDataURL(blob);
+          }),
+      )
+      .catch(() => null);
+    fontDataUrlCache.set(url, cached);
+  }
+  return cached;
+}
+
+// The page's KaTeX rules, split into ordinary style rules and @font-face rules.
+function katexCssRules(): { styleRules: string[]; fontFaces: CSSFontFaceRule[] } {
+  const styleRules: string[] = [];
+  const fontFaces: CSSFontFaceRule[] = [];
+  for (const sheet of Array.from(document.styleSheets)) {
+    let sheetRules: CSSRuleList;
+    try {
+      sheetRules = sheet.cssRules;
+    } catch {
+      continue;
+    }
+    for (const rule of Array.from(sheetRules)) {
+      if (rule instanceof CSSFontFaceRule) {
+        if (rule.style.getPropertyValue("font-family").includes("KaTeX")) fontFaces.push(rule);
+      } else if (rule.cssText.includes("katex")) {
+        styleRules.push(rule.cssText);
+      }
+    }
+  }
+  return { styleRules, fontFaces };
+}
+
+// @font-face rules for just these families, each with its woff2 inlined —
+// an SVG drawn as an image can't fetch anything itself.
+async function inlinedFontFaceCss(fontFaces: CSSFontFaceRule[], families: Set<string>): Promise<string> {
+  const rules = await Promise.all(
+    fontFaces.map(async (rule) => {
+      const family = rule.style.getPropertyValue("font-family").replace(/["']/g, "").trim();
+      if (!families.has(family)) return "";
+      const woff2 = rule.style.getPropertyValue("src").match(/url\(["']?([^"')]+\.woff2)["']?\)/);
+      if (!woff2) return "";
+      const dataUrl = await fetchAsDataUrl(new URL(woff2[1], window.location.href).href);
+      if (!dataUrl) return "";
+      const style = rule.style.getPropertyValue("font-style") || "normal";
+      const weight = rule.style.getPropertyValue("font-weight") || "normal";
+      return `@font-face{font-family:${family};font-style:${style};font-weight:${weight};src:url(${dataUrl}) format("woff2");}`;
+    }),
+  );
+  return rules.join("");
+}
+
+// html2canvas doesn't place text where the browser does: it draws each run
+// at (top of its box + a baseline it measured itself), and that measurement
+// (FontMetrics.parseMetrics in html2canvas 1.4) puts a 1x1 image on the
+// baseline in the app's own document and adds a fixed +2px — where the app's
+// CSS (img { display: block } from Tailwind's reset) shifts it further. So
+// its text lands a few px below the true baseline. Formula images are placed
+// on the TRUE baseline, so they're lowered by the same amount to line up with
+// the text as html2canvas actually draws it. This repeats html2canvas's
+// measurement exactly, in the same document it uses.
+const html2canvasBaselineCache = new Map<string, number>();
+function html2canvasBaseline(fontFamily: string, fontSize: string): number {
+  const key = `${fontFamily}|${fontSize}`;
+  const cached = html2canvasBaselineCache.get(key);
+  if (cached !== undefined) return cached;
+  const container = document.createElement("div");
+  const img = document.createElement("img");
+  const span = document.createElement("span");
+  container.style.visibility = "hidden";
+  container.style.fontFamily = fontFamily;
+  container.style.fontSize = fontSize;
+  container.style.margin = "0";
+  container.style.padding = "0";
+  container.style.whiteSpace = "nowrap";
+  document.body.appendChild(container);
+  img.src = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+  img.width = 1;
+  img.height = 1;
+  img.style.margin = "0";
+  img.style.padding = "0";
+  img.style.verticalAlign = "baseline";
+  span.style.fontFamily = fontFamily;
+  span.style.fontSize = fontSize;
+  span.style.margin = "0";
+  span.style.padding = "0";
+  span.appendChild(document.createTextNode("Hidden Text"));
+  container.appendChild(span);
+  container.appendChild(img);
+  const baseline = img.offsetTop - span.offsetTop + 2;
+  document.body.removeChild(container);
+  html2canvasBaselineCache.set(key, baseline);
+  return baseline;
+}
+
+// How far below the true baseline html2canvas will draw `parent`'s text.
+function html2canvasTextDrop(frameDoc: Document, parent: HTMLElement, before: Node): number {
+  const style = frameDoc.defaultView?.getComputedStyle(parent);
+  if (!style) return 0;
+  const sample = frameDoc.createElement("span");
+  sample.textContent = "Hidden Text";
+  const probe = frameDoc.createElement("span");
+  probe.style.cssText = "display:inline-block;width:0;height:0;vertical-align:baseline;";
+  parent.insertBefore(sample, before);
+  parent.insertBefore(probe, before);
+  const trueBaseline = probe.getBoundingClientRect().top - sample.getBoundingClientRect().top;
+  sample.remove();
+  probe.remove();
+  return html2canvasBaseline(style.fontFamily, style.fontSize) - trueBaseline;
+}
+
+function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("formula image failed to load"));
+    image.src = src;
+  });
+}
+
+// Returns false when this browser can't do it (the caller then leaves the
+// remaining formulas to html2canvas).
+async function replaceFormulasWithImages(frameDoc: Document, root: HTMLElement, scale: number): Promise<boolean> {
+  const frameWindow = frameDoc.defaultView;
+  if (!frameWindow) return false;
+  const formulas = Array.from(root.querySelectorAll<HTMLElement>(".katex")).filter(
+    (el) => !el.parentElement?.closest(".katex"),
+  );
+  if (formulas.length === 0) return true;
+  const { styleRules, fontFaces } = katexCssRules();
+  const styleCss = styleRules.join("");
+  const serializer = new XMLSerializer();
+
+  for (const formula of formulas) {
+    const parent = formula.parentElement;
+    if (!parent) continue;
+    const isDisplay = parent.classList.contains("katex-display");
+    const families = new Set(
+      [formula, ...Array.from(formula.querySelectorAll("*"))]
+        .map((el) => frameWindow.getComputedStyle(el).fontFamily.split(",")[0].replace(/["']/g, "").trim())
+        .filter((family) => family.startsWith("KaTeX")),
+    );
+    const fontCss = await inlinedFontFaceCss(fontFaces, families);
+    const parentStyle = frameWindow.getComputedStyle(parent);
+    const pad = FORMULA_IMAGE_PAD_PX;
+    // The image's content: the formula in a shrink-to-fit box. Laid out once
+    // for real in the frame (same engine as the SVG render) to read its size
+    // and where its baseline falls, so the image can be placed exactly —
+    // guessing from the formula's own box gets inline formulas wrong (line
+    // height, and fractions taller than the text line).
+    const wrapperStyle =
+      `display:inline-block;padding:${pad}px;font-size:${parentStyle.fontSize};color:${parentStyle.color};` +
+      `line-height:${parentStyle.lineHeight};white-space:nowrap;`;
+    const replica = frameDoc.createElement("div");
+    replica.style.cssText = `position:absolute;left:-10000px;top:0;${wrapperStyle}`;
+    const baselineProbe = frameDoc.createElement("span");
+    baselineProbe.style.cssText = "display:inline-block;width:0;height:0;vertical-align:baseline;";
+    replica.append(baselineProbe, formula.cloneNode(true));
+    frameDoc.body.appendChild(replica);
+    const box = replica.getBoundingClientRect();
+    const baselineFromTop = baselineProbe.getBoundingClientRect().top - box.top;
+    const width = Math.ceil(box.width);
+    const height = Math.ceil(box.height);
+    replica.remove();
+
+    const svg =
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">` +
+      `<foreignObject x="0" y="0" width="${width}" height="${height}">` +
+      `<div xmlns="http://www.w3.org/1999/xhtml" style="${wrapperStyle}">` +
+      `<style><![CDATA[${fontCss}${styleCss}]]></style>` +
+      `<span style="display:inline-block;width:0;height:0;vertical-align:baseline;"></span>${serializer.serializeToString(formula)}</div>` +
+      `</foreignObject></svg>`;
+
+    let png: string;
+    try {
+      const image = await loadImage(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`);
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.ceil(width * scale);
+      canvas.height = Math.ceil(height * scale);
+      const context = canvas.getContext("2d");
+      if (!context) return false;
+      context.scale(scale, scale);
+      context.drawImage(image, 0, 0, width, height);
+      png = canvas.toDataURL("image/png"); // throws if the browser tainted the canvas
+    } catch (error) {
+      console.warn("[pdfExport] drawing formulas natively isn't available here; using html2canvas for them", error);
+      return false;
+    }
+
+    const replacement = frameDoc.createElement("img");
+    replacement.src = png;
+    replacement.alt = formula.textContent ?? "";
+    // Inline: the image's own baseline (baselineFromTop) sits on the text
+    // baseline. Display: centered by .katex-display's text-align.
+    replacement.style.cssText = isDisplay
+      ? `display:inline-block;width:${width}px;height:${height}px;vertical-align:middle;`
+      : `display:inline-block;width:${width}px;height:${height}px;vertical-align:${(baselineFromTop - height - html2canvasTextDrop(frameDoc, parent, formula)).toFixed(2)}px;margin:0 -${pad}px;`;
+    formula.replaceWith(replacement);
+  }
+  return true;
+}
+
+async function loadKatexFonts(docs: Document[]): Promise<void> {
+  await Promise.all(
+    docs.flatMap((doc) =>
+      Array.from(doc.fonts)
+        .filter((face) => face.family.includes("KaTeX"))
+        .map((face) => face.load().catch(() => undefined)),
+    ),
+  );
+  await Promise.all(docs.map((doc) => doc.fonts.ready));
+}
+
 export type PdfSectionId = "summary" | "lectureNote" | "transcript" | "checklist";
 
 const SECTION_TITLES: Record<PdfSectionId, string> = {
@@ -646,8 +957,12 @@ export async function exportSectionsToPdf(sections: PdfSectionId[], data: PdfExp
 
     // A blank document written from scratch — never loads the app's
     // Tailwind stylesheet, so no oklch() value can ever reach html2canvas.
+    // <base> so the copied @font-face url()s (root-relative /_next/static/...)
+    // resolve against the app's origin.
     frameDoc.open();
-    frameDoc.write('<!DOCTYPE html><html><head><meta charset="utf-8" /></head><body></body></html>');
+    frameDoc.write(
+      `<!DOCTYPE html><html><head><meta charset="utf-8" /><base href="${window.location.origin}/" /></head><body></body></html>`,
+    );
     frameDoc.close();
 
     const safeTitle = escapeHtml(data.title || "제목 없는 강의");
@@ -670,6 +985,15 @@ export async function exportSectionsToPdf(sections: PdfSectionId[], data: PdfExp
 
     const printRoot = frameDoc.getElementById("pdf-export-root");
     if (!printRoot) throw new Error("PDF 렌더링용 컨테이너를 찾지 못했습니다.");
+
+    const hasMath = !!printRoot.querySelector(".katex");
+    if (hasMath) {
+      const style = frameDoc.createElement("style");
+      style.textContent = copyKatexCss();
+      frameDoc.head.appendChild(style);
+      await loadKatexFonts([frameDoc, document]);
+      await replaceFormulasWithImages(frameDoc, printRoot, CAPTURE_SCALE);
+    }
 
     // Slide images are inline data: URLs, so this resolves near-instantly —
     // but html2canvas still needs actual decoded dimensions before it
@@ -694,6 +1018,11 @@ export async function exportSectionsToPdf(sections: PdfSectionId[], data: PdfExp
       scale: CAPTURE_SCALE,
       backgroundColor: PDF_BACKGROUND,
       useCORS: true,
+      // html2canvas measures positions in its own copy of the frame. Its
+      // fonts must be loaded there too before measuring, or formulas are
+      // laid out with fallback-font metrics (fraction bars through the
+      // numerator, subscripts on the baseline) while drawn in KaTeX fonts.
+      onclone: hasMath ? (clonedDoc) => loadKatexFonts([clonedDoc]) : undefined,
     });
 
     const mmPerCanvasPx = USABLE_WIDTH_MM / canvas.width;
