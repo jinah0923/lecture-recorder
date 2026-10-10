@@ -58,6 +58,8 @@ const PDF_FONT_FAMILY = "'Apple SD Gothic Neo', 'Malgun Gothic', -apple-system, 
 const BODY_STYLE = "font-size:12.5px;color:#374151;line-height:1.6;";
 const AVOID_BREAK_STYLE = "break-inside:avoid;page-break-inside:avoid;";
 const AVOID_BREAK_ATTR = 'data-avoid-break="true"';
+// A diagram or slide image: never sliced across pages (see AvoidRange).
+const KEEP_WHOLE_ATTR = 'data-keep-whole="true"';
 // A heading: a page never ends right after it (see measureAvoidRanges).
 const KEEP_WITH_NEXT_ATTR = 'data-keep-with-next="true"';
 
@@ -378,7 +380,7 @@ export function renderMarkdownToHtml(markdown: string, slideImages?: Map<number,
       const dataUrl = slideImages?.get(page);
       if (dataUrl) {
         blocks.push(
-          `<div ${AVOID_BREAK_ATTR} style="${AVOID_BREAK_STYLE}margin:6px 0;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;"><img src="${dataUrl}" alt="슬라이드 ${page}" style="display:block;width:100%;" /><p style="margin:0;padding:6px 10px;font-size:11px;color:#6b7280;border-top:1px solid #e5e7eb;">🖼️ 슬라이드 ${page}</p></div>`,
+          `<div ${AVOID_BREAK_ATTR} ${KEEP_WHOLE_ATTR} style="${AVOID_BREAK_STYLE}margin:6px 0;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;"><img src="${dataUrl}" alt="슬라이드 ${page}" style="display:block;width:100%;" /><p style="margin:0;padding:6px 10px;font-size:11px;color:#6b7280;border-top:1px solid #e5e7eb;">🖼️ 슬라이드 ${page}</p></div>`,
         );
       } else {
         blocks.push(
@@ -401,7 +403,16 @@ export function renderMarkdownToHtml(markdown: string, slideImages?: Map<number,
 
     if (isCodeFence(line)) {
       flushList();
-      const { code, next } = readCodeFence(lines, index);
+      const { code, next, language } = readCodeFence(lines, index);
+      // A diagram: replaced by its rendered image in exportSectionsToPdf
+      // (see renderMermaidDiagrams); the source stays as the fallback.
+      if (language === "mermaid") {
+        blocks.push(
+          `<div ${AVOID_BREAK_ATTR} ${KEEP_WHOLE_ATTR} data-mermaid="${escapeHtml(encodeURIComponent(code))}" style="${AVOID_BREAK_STYLE}margin:10px 0;text-align:center;"><pre style="margin:0;padding:10px 14px;border:1px solid #e2e8f0;border-radius:8px;background:#f8fafc;font-family:Consolas,Menlo,monospace;font-size:11px;color:#374151;white-space:pre-wrap;text-align:left;">${escapeHtml(code)}</pre></div>`,
+        );
+        index = next;
+        continue;
+      }
       blocks.push(
         `<pre ${AVOID_BREAK_ATTR} style="${AVOID_BREAK_STYLE}margin:8px 0;padding:10px 14px;border:1px solid #e2e8f0;border-radius:8px;background:#f1f5f9;font-family:Consolas,Menlo,monospace;font-size:12px;font-weight:600;color:#1f2937;white-space:pre-wrap;word-break:break-word;">${escapeHtml(code)}</pre>`,
       );
@@ -540,7 +551,10 @@ const MARGIN_MM = 15;
 const USABLE_WIDTH_MM = PAGE_WIDTH_MM - MARGIN_MM * 2;
 const USABLE_HEIGHT_MM = PAGE_HEIGHT_MM - MARGIN_MM * 2;
 
-export type AvoidRange = { top: number; bottom: number };
+// keepWhole: a diagram or slide image — moved to the next page as a unit
+// even when that leaves more blank space than the usual limit, because a
+// picture sliced across two pages is unreadable (see KEEP_WHOLE_ATTR).
+export type AvoidRange = { top: number; bottom: number; keepWhole?: boolean };
 
 // The PDF is one tall canvas cut into pages, so "page-break-inside: avoid"
 // has to be done here: a page ends just above any block it would otherwise
@@ -549,12 +563,17 @@ export type AvoidRange = { top: number; bottom: number };
 // pushed whole to the next page, which is what used to leave pages mostly
 // blank. That also bounds the empty space at the bottom of any page.
 const MAX_UNBROKEN_FRACTION = 0.3;
+// Pictures up to this share of a page are never cut; taller ones must be.
+const MAX_KEEP_WHOLE_FRACTION = 0.9;
 
 // Where each page ends. No forced breaks: selected sections simply follow
 // one another, separated by a divider (see exportSectionsToPdf).
 export function computePageSlices(canvasHeightPx: number, usableHeightPx: number, avoidRanges: AvoidRange[]) {
   const maxUnbroken = usableHeightPx * MAX_UNBROKEN_FRACTION;
   const ranges = avoidRanges.filter((range) => range.bottom - range.top <= maxUnbroken);
+  const wholeRanges = avoidRanges.filter(
+    (range) => range.keepWhole && range.bottom - range.top <= usableHeightPx * MAX_KEEP_WHOLE_FRACTION,
+  );
   const slices: Array<{ sy: number; sh: number }> = [];
   let y = 0;
   while (y < canvasHeightPx - 0.5) {
@@ -570,6 +589,12 @@ export function computePageSlices(canvasHeightPx: number, usableHeightPx: number
         moved = false;
         for (const range of ranges) {
           if (range.top >= minEnd && range.top < end && range.bottom > end) {
+            end = range.top;
+            moved = true;
+          }
+        }
+        for (const range of wholeRanges) {
+          if (range.top > y + 1 && range.top < end && range.bottom > end) {
             end = range.top;
             moved = true;
           }
@@ -597,6 +622,9 @@ function measureAvoidRanges(root: HTMLElement, scale: number): AvoidRange[] {
     return { top: (rect.top - rootTop) * scale, bottom: (rect.bottom - rootTop) * scale };
   };
   const ranges = Array.from(root.querySelectorAll(MIN_BLOCK_SELECTOR)).map(toRange);
+  for (const picture of Array.from(root.querySelectorAll("[data-keep-whole]"))) {
+    ranges.push({ ...toRange(picture), keepWhole: true });
+  }
   for (const heading of Array.from(root.querySelectorAll("[data-keep-with-next]"))) {
     const next = heading.nextElementSibling;
     if (!next) continue;
@@ -859,6 +887,51 @@ async function replaceFormulasWithImages(frameDoc: Document, root: HTMLElement, 
   return true;
 }
 
+// ```mermaid diagrams -> images. mermaid draws them as SVG (labels as plain
+// SVG text, so the SVG can be rasterized everywhere), which is turned into a
+// PNG at the capture scale and dropped in place of the source placeholder.
+// A diagram that fails to render keeps showing its source.
+async function renderMermaidDiagrams(root: HTMLElement, scale: number): Promise<void> {
+  const placeholders = Array.from(root.querySelectorAll<HTMLElement>("[data-mermaid]"));
+  if (placeholders.length === 0) return;
+  const { renderMermaidSvg } = await import("@/lib/mermaidRender");
+  const maxWidth = CONTENT_WIDTH_PX - 20;
+  for (const placeholder of placeholders) {
+    try {
+      const code = decodeURIComponent(placeholder.dataset.mermaid ?? "");
+      const svgText = await renderMermaidSvg(code, { dark: false, htmlLabels: false });
+      if (!svgText) continue;
+      // mermaid's SVG is width="100%" with a viewBox; give it a real size so
+      // it can be drawn as an image.
+      const svgDoc = new DOMParser().parseFromString(svgText, "image/svg+xml");
+      const svg = svgDoc.documentElement;
+      const viewBox = (svg.getAttribute("viewBox") ?? "").split(/[\s,]+/).map(Number);
+      if (viewBox.length !== 4 || !(viewBox[2] > 0) || !(viewBox[3] > 0)) continue;
+      const width = Math.min(viewBox[2], maxWidth);
+      const height = (viewBox[3] * width) / viewBox[2];
+      svg.setAttribute("width", String(width));
+      svg.setAttribute("height", String(height));
+      svg.removeAttribute("style");
+      const image = await loadImage(
+        `data:image/svg+xml;charset=utf-8,${encodeURIComponent(new XMLSerializer().serializeToString(svg))}`,
+      );
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.ceil(width * scale);
+      canvas.height = Math.ceil(height * scale);
+      const context = canvas.getContext("2d");
+      if (!context) continue;
+      context.fillStyle = "#ffffff";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.scale(scale, scale);
+      context.drawImage(image, 0, 0, width, height);
+      const png = canvas.toDataURL("image/png");
+      placeholder.innerHTML = `<img src="${png}" alt="다이어그램" style="display:inline-block;width:${width}px;height:${height}px;" />`;
+    } catch (error) {
+      console.warn("[pdfExport] diagram could not be rendered; keeping its source", error);
+    }
+  }
+}
+
 async function loadKatexFonts(docs: Document[]): Promise<void> {
   await Promise.all(
     docs.flatMap((doc) =>
@@ -985,6 +1058,8 @@ export async function exportSectionsToPdf(sections: PdfSectionId[], data: PdfExp
 
     const printRoot = frameDoc.getElementById("pdf-export-root");
     if (!printRoot) throw new Error("PDF 렌더링용 컨테이너를 찾지 못했습니다.");
+
+    await renderMermaidDiagrams(printRoot, CAPTURE_SCALE);
 
     const hasMath = !!printRoot.querySelector(".katex");
     if (hasMath) {

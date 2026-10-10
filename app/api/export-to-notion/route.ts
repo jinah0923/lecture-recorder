@@ -245,11 +245,12 @@ function convertLectureNoteToBlocks(markdown: string): BlockNode[] {
 
     // Fenced code block -> Notion's own code block, verbatim.
     if (isCodeFence(line)) {
-      const { code, next } = readCodeFence(lines, index);
+      const { code, next, language } = readCodeFence(lines, index);
       push({
         type: "code",
         code: {
-          language: "plain text",
+          // Notion renders a "mermaid" code block as the diagram itself.
+          language: language === "mermaid" ? "mermaid" : "plain text",
           rich_text: chunkText(code, RICH_TEXT_CHAR_LIMIT).map((content) => ({ type: "text" as const, text: { content } })),
         },
       });

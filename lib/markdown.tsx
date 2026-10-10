@@ -3,6 +3,7 @@ import katex from "katex";
 // Registers \ce{...} / \pu{...} for chemical formulas (H2O, reaction arrows).
 import "katex/contrib/mhchem";
 import { MarkdownImage } from "@/components/MarkdownImage";
+import { MermaidDiagram } from "@/components/MermaidDiagram";
 import { SlideImage } from "@/components/SlideImage";
 import { stripMarkTags, tokenizeInline } from "@/lib/inlineMarkdown";
 import { displayMathFenceClose, matchDisplayMathLine, protectMath, splitMathPlaceholders } from "@/lib/inlineMath";
@@ -301,7 +302,13 @@ export function renderMarkdown(markdown: string, slideImages?: Map<number, strin
     // tinted panel style as formula blocks.
     if (isCodeFence(line)) {
       flushList(String(index));
-      const { code, next } = readCodeFence(lines, index);
+      const { code, next, language } = readCodeFence(lines, index);
+      // ```mermaid — a diagram the AI drew from the lecture material.
+      if (language === "mermaid") {
+        blocks.push(<MermaidDiagram key={index} code={code} />);
+        index = next;
+        continue;
+      }
       blocks.push(
         <pre
           key={index}

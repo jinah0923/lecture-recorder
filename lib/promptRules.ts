@@ -63,3 +63,26 @@ export const JOURNAL_ENTRY_RULE = [
   "- 분개는 등식이 아니므로 `> 🧮` 수식 블록으로 쓰지 마세요. 분개 줄 안에서는 `**` 볼드를 쓰지 마세요.",
   "- 계정과목 명칭은 [원본 워딩 최우선 보존] 규칙대로 교수가 말한(또는 자료에 적힌) 그대로 쓰세요.",
 ].join("\n");
+
+// Diagrams in the lecture material (mind maps, flowcharts, hierarchies, cause
+// and effect figures) were being dropped as "[도식 참조]" or flattened into a
+// table. The note renderers draw ```mermaid blocks (components/MermaidDiagram.tsx,
+// PDF and Notion exports too), so the model reproduces the figure as one. The
+// syntax notes are what keeps generated diagrams parseable — Korean labels
+// and parentheses are the usual breakers.
+export const MERMAID_DIAGRAM_RULE = [
+  "[도식·다이어그램은 Mermaid로 재현] 강의자료(교안·교재·슬라이드)에 마인드맵, 순서도(흐름도·절차), 위계도(분류 트리·" +
+    "조직도), 인과관계나 구성요소를 보여주는 도식(예: 병 발생 3요소 삼각형 — 숙주·병원체·환경), 비율 그래프가 있으면 " +
+    "'[도식 참조]'처럼 생략하거나 줄글·표로만 풀어 쓰지 마세요. 그 도식이 나오는 위치에 ```mermaid 코드 블록으로 원본의 " +
+    "시각적 구조(무엇이 무엇과 어떤 방향으로 연결되는지)를 그대로 재현하세요. 다이어그램이 설명을 대신하지는 않습니다 — " +
+    "다이어그램 바로 위나 아래에 그 내용을 글로도 완전하게 설명하세요.",
+  "- 종류 선택: 순서도·절차·인과의 흐름 → `flowchart TD`(가로 흐름이 자연스러우면 `flowchart LR`), 마인드맵·개념의 위계 → " +
+    "`mindmap`, 비율·구성비 → `pie`, 순환·삼각 관계(예: 숙주-병원체-환경) → `flowchart`에서 노드끼리 `<-->` 양방향 화살표.",
+  "- 문법 규칙(어기면 다이어그램이 깨집니다): flowchart의 노드 ID는 영문·숫자(A, B1 등)로 짓고, 한글·공백·괄호·특수문자가 " +
+    "들어간 라벨은 반드시 큰따옴표로 감싸세요. 예: `A[\"병원체(Pathogen)\"] --> B[\"숙주\"]`, 화살표 위 설명은 " +
+    "`A -->|\"감염\"| B`. 라벨 안에는 큰따옴표, <mark>, **, $수식$, 세미콜론(;)을 쓰지 마세요.",
+  "- mindmap은 첫 줄 `mindmap` 다음에 `  root((주제))`를 두고, 하위 항목은 공백 2칸씩 더 들여써 한 줄에 하나씩 쓰세요. " +
+    "pie는 `pie title 제목` 다음 줄부터 `    \"항목\" : 숫자` 형식입니다.",
+  "- 다이어그램 하나는 노드 20개 이내로 유지하고, 그보다 크면 소주제별로 나눠 여러 개로 그리세요. 강의자료에 실제로 있는 " +
+    "도식만 그리세요 — 없는 도식을 지어내지 마세요.",
+].join("\n");

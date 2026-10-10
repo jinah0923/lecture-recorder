@@ -129,8 +129,9 @@ export function markdownToClipboardHtml(markdown: string): string {
 
     if (isCodeFence(line)) {
       flushList();
-      const { code, next } = readCodeFence(lines, index);
-      blocks.push(`<pre><code>${escapeHtml(code)}</code></pre>`);
+      const { code, next, language } = readCodeFence(lines, index);
+      const languageClass = language ? ` class="language-${escapeHtml(language)}"` : "";
+      blocks.push(`<pre><code${languageClass}>${escapeHtml(code)}</code></pre>`);
       index = next;
       continue;
     }

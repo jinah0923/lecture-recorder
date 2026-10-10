@@ -29,16 +29,18 @@ export function isCodeFence(line: string): boolean {
 }
 
 // Consumes a fenced code block starting at `start` (the opening fence) and
-// returns its raw lines plus the index just past the closing fence. An
+// returns its raw lines, its language (lowercased; "mermaid" for a diagram,
+// "" when none was given), plus the index just past the closing fence. An
 // unclosed fence runs to the end of the note.
-export function readCodeFence(lines: string[], start: number): { code: string; next: number } {
+export function readCodeFence(lines: string[], start: number): { code: string; next: number; language: string } {
+  const language = lines[start].trim().slice(3).trim().split(/\s+/)[0].toLowerCase();
   const body: string[] = [];
   let cursor = start + 1;
   while (cursor < lines.length && !isCodeFence(lines[cursor])) {
     body.push(lines[cursor]);
     cursor++;
   }
-  return { code: body.join("\n"), next: Math.min(cursor + 1, lines.length) };
+  return { code: body.join("\n"), next: Math.min(cursor + 1, lines.length), language };
 }
 
 // Consecutive lines starting at `start` that `match` accepts — e.g. a
