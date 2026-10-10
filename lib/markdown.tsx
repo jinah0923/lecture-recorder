@@ -4,7 +4,7 @@ import katex from "katex";
 import "katex/contrib/mhchem";
 import { MarkdownImage } from "@/components/MarkdownImage";
 import { SlideImage } from "@/components/SlideImage";
-import { tokenizeInline } from "@/lib/inlineMarkdown";
+import { stripMarkTags, tokenizeInline } from "@/lib/inlineMarkdown";
 import { displayMathFenceClose, matchDisplayMathLine, protectMath, splitMathPlaceholders } from "@/lib/inlineMath";
 import type { MathSpan } from "@/lib/inlineMath";
 import {
@@ -177,6 +177,17 @@ function headingClassName(level: number) {
   if (level === 2) return "text-xl font-bold mt-6 mb-2.5 text-zinc-900 dark:text-zinc-100";
   if (level === 3) return "text-lg font-semibold mt-4 mb-2 text-zinc-800 dark:text-zinc-200";
   return "text-base font-semibold mt-3 mb-1.5 text-zinc-700 dark:text-zinc-300";
+}
+
+// A column's minimum width, by its longest cell: short labels stay compact,
+// while a column of sentences gets room to read a few words per line rather
+// than a long, narrow strip (the table scrolls sideways when the total runs
+// past the screen). Literal class names so Tailwind generates them.
+function tableColumnMinWidthClass(cells: string[]): string {
+  const longest = Math.max(0, ...cells.map((cell) => stripMarkTags(cell).replaceAll("**", "").length));
+  if (longest > 40) return "min-w-[240px]";
+  if (longest > 16) return "min-w-[180px]";
+  return "min-w-[120px]";
 }
 
 function splitTableRow(line: string): string[] {
@@ -382,15 +393,27 @@ export function renderMarkdown(markdown: string, slideImages?: Map<number, strin
         bodyRows.push(splitTableRow(lines[cursor]));
         cursor++;
       }
+      const columnMinWidths = headerCells.map((header, column) =>
+        tableColumnMinWidthClass([header, ...bodyRows.map((row) => row[column] ?? "")]),
+      );
+      // On a narrow screen the table used to squeeze every column to its
+      // narrowest possible width — and Korean can break between any two
+      // characters, so cells ended up one character per line. Now each cell
+      // keeps a minimum width and breaks only between words (break-keep);
+      // when that doesn't fit, the table runs wider than the screen and
+      // scrolls sideways inside its wrapper instead.
       blocks.push(
-        <div key={`table-${index}`} className="my-1 overflow-x-auto rounded-lg border border-slate-200 dark:border-zinc-800">
+        <div
+          key={`table-${index}`}
+          className="my-4 w-full overflow-x-auto rounded-lg border border-slate-200 dark:border-zinc-700"
+        >
           <table className="w-full border-collapse text-left text-sm">
-            <thead className="bg-zinc-50 dark:bg-zinc-900">
+            <thead>
               <tr>
                 {headerCells.map((cell, cellIndex) => (
                   <th
                     key={cellIndex}
-                    className="border-b border-slate-200 px-3 py-1.5 font-semibold text-zinc-700 dark:border-zinc-800 dark:text-zinc-300"
+                    className={`${columnMinWidths[cellIndex]} whitespace-nowrap border-b border-r border-slate-200 bg-zinc-100 px-4 py-2 font-semibold text-zinc-800 last:border-r-0 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100`}
                   >
                     {renderInline(cell)}
                   </th>
@@ -399,9 +422,12 @@ export function renderMarkdown(markdown: string, slideImages?: Map<number, strin
             </thead>
             <tbody>
               {bodyRows.map((row, rowIndex) => (
-                <tr key={rowIndex} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/60">
+                <tr key={rowIndex}>
                   {row.map((cell, cellIndex) => (
-                    <td key={cellIndex} className="px-3 py-1.5 text-zinc-600 dark:text-zinc-400">
+                    <td
+                      key={cellIndex}
+                      className={`${columnMinWidths[cellIndex] ?? "min-w-[120px]"} break-keep border-r border-t border-slate-200 px-4 py-2 align-top leading-[1.6] text-zinc-700 last:border-r-0 dark:border-zinc-700 dark:text-zinc-300`}
+                    >
                       {renderInline(cell)}
                     </td>
                   ))}
