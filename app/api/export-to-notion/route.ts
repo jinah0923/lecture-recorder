@@ -4,6 +4,7 @@ import type { BlockObjectRequest } from "@notionhq/client";
 import { extractNotionId } from "@/lib/notionUtils";
 import { formatDuration } from "@/lib/format";
 import { tokenizeInline } from "@/lib/inlineMarkdown";
+import { displayMathFenceClose, matchDisplayMathLine, protectMath, splitMathPlaceholders } from "@/lib/inlineMath";
 import {
   EQUATION_MARKER,
   buildListTree,
@@ -30,11 +31,15 @@ const MAX_BLOCK_ELEMENTS_PER_REQUEST = 1000;
 // API calls and blow the function's time budget.
 const MAX_TRANSCRIPT_PARAGRAPHS = 500;
 
-type NotionRichText = {
-  type?: "text";
-  text: { content: string };
-  annotations?: { bold?: boolean; color?: NotionCalloutColor };
-};
+type NotionAnnotations = { bold?: boolean; color?: NotionCalloutColor };
+// Plain text, or an inline equation (Notion renders its expression with
+// KaTeX, the same engine as the app — see lib/markdown.tsx).
+type NotionRichText =
+  | { type?: "text"; text: { content: string }; annotations?: NotionAnnotations }
+  | { type: "equation"; equation: { expression: string }; annotations?: NotionAnnotations };
+
+// Notion's cap on an equation's expression; anything longer goes as text.
+const EQUATION_CHAR_LIMIT = 1000;
 
 // A block plus the blocks nested under it (sub-bullets under a bullet,
 // toggle contents). Kept as a tree until appendBlockTree sends it, which puts
@@ -102,22 +107,33 @@ function chunkText(text: string, maxLen: number): string[] {
 // <mark> (the note's 형광펜, see lib/inlineMarkdown.ts) maps to a Notion
 // text background color. Callers inside a callout that's already yellow pass
 // a different color so the highlight doesn't vanish into its background.
+// LaTeX in the text ($\alpha$, \(...\), and $$...$$ mid-sentence) becomes
+// Notion inline equations. Formulas are swapped for placeholders before the
+// **bold** / <mark> pass and restored afterwards (same as lib/markdown.tsx),
+// so a formula's own * or < isn't misread and a highlighted or bold formula
+// keeps that styling. A $$...$$ on its own line is an equation block instead
+// (see convertLectureNoteToBlocks).
 function buildRichText(text: string, bold = false, highlightColor: NotionCalloutColor = "yellow_background"): NotionRichText[] {
   if (!text) return [];
+  const { text: protectedText, spans } = protectMath(text);
   const result: NotionRichText[] = [];
-  for (const group of tokenizeInline(text)) {
+  for (const group of tokenizeInline(protectedText)) {
     for (const part of group.parts) {
       const isBold = bold || part.bold;
-      const annotations = {
+      const annotations: NotionAnnotations = {
         ...(isBold ? { bold: true } : {}),
         ...(group.highlight ? { color: highlightColor } : {}),
       };
-      for (const chunk of chunkText(part.text, RICH_TEXT_CHAR_LIMIT)) {
-        result.push({
-          type: "text",
-          text: { content: chunk },
-          ...(Object.keys(annotations).length > 0 ? { annotations } : {}),
-        });
+      const withAnnotations = Object.keys(annotations).length > 0 ? { annotations } : {};
+      for (const piece of splitMathPlaceholders(part.text)) {
+        if (typeof piece === "number" && spans[piece].tex.length <= EQUATION_CHAR_LIMIT) {
+          result.push({ type: "equation", equation: { expression: spans[piece].tex }, ...withAnnotations });
+          continue;
+        }
+        const content = typeof piece === "number" ? `$${spans[piece].tex}$` : piece;
+        for (const chunk of chunkText(content, RICH_TEXT_CHAR_LIMIT)) {
+          result.push({ type: "text", text: { content: chunk }, ...withAnnotations });
+        }
       }
     }
   }
@@ -237,6 +253,29 @@ function convertLectureNoteToBlocks(markdown: string): BlockNode[] {
           rich_text: chunkText(code, RICH_TEXT_CHAR_LIMIT).map((content) => ({ type: "text" as const, text: { content } })),
         },
       });
+      index = next;
+      continue;
+    }
+
+    // Display formula — a line that's one whole "$$...$$" / "\[...\]", or a
+    // "$$" / "\[" line opening a multi-line one — becomes a Notion equation
+    // block (centered, like the app's display math).
+    const displayTex = matchDisplayMathLine(line);
+    const displayFenceClose = displayTex === null ? displayMathFenceClose(line) : null;
+    if (displayTex !== null || displayFenceClose !== null) {
+      let expression = displayTex ?? "";
+      let next = index + 1;
+      if (displayFenceClose !== null) {
+        const body: string[] = [];
+        while (next < lines.length && lines[next].trim() !== displayFenceClose) body.push(lines[next++]);
+        expression = body.join("\n").trim();
+        next = Math.min(next + 1, lines.length);
+      }
+      if (expression && expression.length <= EQUATION_CHAR_LIMIT) {
+        push({ type: "equation", equation: { expression } });
+      } else if (expression) {
+        push({ type: "paragraph", paragraph: { rich_text: buildRichText(`$$${expression}$$`) } });
+      }
       index = next;
       continue;
     }
