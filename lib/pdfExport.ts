@@ -103,12 +103,22 @@ function highlightHtml(parts: { text: string; bold: boolean }[]): string {
   return `<mark style="background:transparent;color:inherit;">${spans.join("")}</mark>`;
 }
 
-function renderInlineHtml(text: string): string {
+// Invisible break points (zero-width spaces) inside unusually long unbroken
+// runs — only used in table cells (renderTableHtml), where one such run would
+// otherwise make its column too wide for the page. Ordinary words, Korean
+// compounds included, are shorter than this and stay whole.
+const LONG_RUN = /[^\s]{15,}/gu;
+function softBreakLongRuns(text: string): string {
+  return text.replace(LONG_RUN, (run) => (run.match(/.{1,10}/gu) ?? [run]).join("\u200B"));
+}
+
+function renderInlineHtml(text: string, options: { softBreakLongRuns?: boolean } = {}): string {
+  const plain = (value: string) => escapeHtml(options.softBreakLongRuns ? softBreakLongRuns(value) : value);
   return tokenizeInline(text)
     .map((group) =>
       group.highlight
         ? highlightHtml(group.parts)
-        : group.parts.map((part) => (part.bold ? `<strong>${escapeHtml(part.text)}</strong>` : escapeHtml(part.text))).join(""),
+        : group.parts.map((part) => (part.bold ? `<strong>${plain(part.text)}</strong>` : plain(part.text))).join(""),
     )
     .join("");
 }
@@ -157,6 +167,51 @@ const SLIDE_IMAGE_PATTERN = /^!\[[^\]]*\]\(slide_(\d+)\)$/;
 // Matches lib/markdown.tsx's generic (non-slide) image pattern — an external
 // URL the AI cited for "AI 심화 탐구" (see app/api/expand-note/route.ts).
 const IMAGE_PATTERN = /^!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)$/;
+
+// Same look as the on-screen table (lib/markdown.tsx): thin grid lines, a
+// light gray semibold header, px-4 py-2 cell padding, and keep-all so cells
+// break between words instead of between Korean syllables. Unlike the screen
+// there's no sideways scrolling on paper, so no overflow, no nowrap and no
+// per-column minimum widths: the table is the page's full width and its
+// columns share it. overflow-wrap: break-word (not "anywhere", which would
+// let the browser size a column down to one character and wrap "자산" as
+// "자/산") plus softBreakLongRuns keep an over-long word from pushing the
+// table past the page edge. The rounded outer
+// border comes from border-collapse: separate (rounded corners can't be
+// clipped without overflow).
+const PDF_TABLE_BORDER = "#e2e8f0";
+const PDF_TABLE_RADIUS = "8px";
+
+function renderTableHtml(headerCells: string[], bodyRows: string[][]): string {
+  const columnCount = headerCells.length;
+  const cellBase =
+    `padding:8px 16px;vertical-align:top;line-height:1.6;word-break:keep-all;overflow-wrap:break-word;text-align:left;`;
+  const rightBorder = (column: number) => (column < columnCount - 1 ? `border-right:1px solid ${PDF_TABLE_BORDER};` : "");
+  const theadHtml = `<thead><tr>${headerCells
+    .map((cell, column) => {
+      const corner =
+        (column === 0 ? `border-top-left-radius:${PDF_TABLE_RADIUS};` : "") +
+        (column === columnCount - 1 ? `border-top-right-radius:${PDF_TABLE_RADIUS};` : "");
+      return `<th style="${cellBase}${rightBorder(column)}${corner}background:#f4f4f5;font-weight:600;color:#27272a;">${renderInlineHtml(cell, { softBreakLongRuns: true })}</th>`;
+    })
+    .join("")}</tr></thead>`;
+  const tbodyHtml = `<tbody>${bodyRows
+    .map(
+      (row) =>
+        `<tr>${headerCells
+          .map(
+            (_header, column) =>
+              `<td style="${cellBase}${rightBorder(column)}border-top:1px solid ${PDF_TABLE_BORDER};color:#3f3f46;">${renderInlineHtml(row[column] ?? "", { softBreakLongRuns: true })}</td>`,
+          )
+          .join("")}</tr>`,
+    )
+    .join("")}</tbody>`;
+  return (
+    `<div ${AVOID_BREAK_ATTR} style="${AVOID_BREAK_STYLE}margin:12px 0;">` +
+    `<table style="width:100%;border-collapse:separate;border-spacing:0;border:1px solid ${PDF_TABLE_BORDER};border-radius:${PDF_TABLE_RADIUS};font-size:12px;">` +
+    `${theadHtml}${tbodyHtml}</table></div>`
+  );
+}
 
 // Bullet style per nesting level, like a browser's default nested lists.
 const BULLET_STYLES = ["disc", "circle", "square"];
@@ -266,23 +321,7 @@ export function renderMarkdownToHtml(markdown: string, slideImages?: Map<number,
         bodyRows.push(splitTableRow(lines[cursor]));
         cursor++;
       }
-      const theadHtml = `<thead style="background:#fafafa;"><tr>${headerCells
-        .map(
-          (cell) =>
-            `<th style="border-bottom:1px solid #e5e7eb;padding:6px 10px;font-weight:700;color:#374151;">${renderInlineHtml(cell)}</th>`,
-        )
-        .join("")}</tr></thead>`;
-      const tbodyHtml = `<tbody>${bodyRows
-        .map(
-          (row, rowIndex) =>
-            `<tr style="border-bottom:${rowIndex === bodyRows.length - 1 ? "none" : "1px solid #f3f4f6"};">${row
-              .map((cell) => `<td style="padding:6px 10px;color:#4b5563;">${renderInlineHtml(cell)}</td>`)
-              .join("")}</tr>`,
-        )
-        .join("")}</tbody>`;
-      blocks.push(
-        `<div ${AVOID_BREAK_ATTR} style="${AVOID_BREAK_STYLE}margin:6px 0;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;"><table style="width:100%;border-collapse:collapse;text-align:left;font-size:12px;">${theadHtml}${tbodyHtml}</table></div>`,
-      );
+      blocks.push(renderTableHtml(headerCells, bodyRows));
       index = cursor;
       continue;
     }
