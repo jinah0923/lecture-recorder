@@ -1,7 +1,12 @@
 import { Fragment, type ReactNode } from "react";
+import katex from "katex";
+// Registers \ce{...} / \pu{...} for chemical formulas (H2O, reaction arrows).
+import "katex/contrib/mhchem";
 import { MarkdownImage } from "@/components/MarkdownImage";
 import { SlideImage } from "@/components/SlideImage";
 import { tokenizeInline } from "@/lib/inlineMarkdown";
+import { displayMathFenceClose, matchDisplayMathLine, protectMath, splitMathPlaceholders } from "@/lib/inlineMath";
+import type { MathSpan } from "@/lib/inlineMath";
 import {
   buildListTree,
   isCodeFence,
@@ -87,23 +92,66 @@ function renderEquationBlock(key: string | number, equations: string[]): ReactNo
   );
 }
 
+// KaTeX output for a formula, cached — the note re-renders on every edit
+// and keystroke elsewhere on the page, and the same formulas recur.
+// throwOnError: false shows a bad formula as red source text instead of
+// breaking the note. Styles come from katex.min.css (app/layout.tsx).
+const mathHtmlCache = new Map<string, string>();
+function renderMathHtml(tex: string, display: boolean): string {
+  const key = `${display ? "D" : "I"}${tex}`;
+  let html = mathHtmlCache.get(key);
+  if (html === undefined) {
+    html = katex.renderToString(tex, { displayMode: display, throwOnError: false, strict: "ignore" });
+    if (mathHtmlCache.size > 500) mathHtmlCache.clear();
+    mathHtmlCache.set(key, html);
+  }
+  return html;
+}
+
+function MathFormula({ tex, display }: MathSpan) {
+  // KaTeX escapes everything it outputs and \href/\url stay disabled (trust
+  // is off by default), so its HTML is safe to inject.
+  const __html = renderMathHtml(tex, display);
+  return display ? (
+    <span className="block overflow-x-auto overflow-y-hidden" dangerouslySetInnerHTML={{ __html }} />
+  ) : (
+    <span dangerouslySetInnerHTML={{ __html }} />
+  );
+}
+
+// A text run with formula placeholders (see protectMath) put back as KaTeX.
+function renderTextWithMath(text: string, spans: MathSpan[]): ReactNode {
+  if (spans.length === 0) return text;
+  return splitMathPlaceholders(text).map((piece, index) =>
+    typeof piece === "number" ? (
+      <MathFormula key={index} {...spans[piece]} />
+    ) : (
+      <Fragment key={index}>{piece}</Fragment>
+    ),
+  );
+}
+
 // <mark> is the note's "형광펜" — sentences the professor or the slides
 // emphasized (see the [강조 요소] rule in app/api/transcribe-and-summarize).
 // Text is forced dark on both themes since it sits on a yellow fill, and
 // box-decoration-clone keeps the padding/rounding on every line when a long
 // highlighted sentence wraps.
+// LaTeX ($\alpha$, \(...\), $$...$$) is swapped for placeholders before the
+// bold/highlight pass and rendered back afterwards, so a formula's own * or
+// < can't be misread, and a <mark> around a formula still highlights it.
 function renderInline(text: string): ReactNode[] {
-  return tokenizeInline(text).map((group, groupIndex) => {
+  const { text: protectedText, spans } = protectMath(text);
+  return tokenizeInline(protectedText).map((group, groupIndex) => {
     const parts = group.parts.map((part, partIndex) =>
       part.bold ? (
         <strong
           key={partIndex}
           className={group.highlight ? "font-bold" : "font-bold text-zinc-900 dark:text-zinc-100"}
         >
-          {part.text}
+          {renderTextWithMath(part.text, spans)}
         </strong>
       ) : (
-        <Fragment key={partIndex}>{part.text}</Fragment>
+        <Fragment key={partIndex}>{renderTextWithMath(part.text, spans)}</Fragment>
       ),
     );
     return group.highlight ? (
@@ -250,6 +298,29 @@ export function renderMarkdown(markdown: string, slideImages?: Map<number, strin
         >
           <code>{code}</code>
         </pre>,
+      );
+      index = next;
+      continue;
+    }
+
+    // Display formula: a line that is one whole "$$...$$" / "\[...\]", or a
+    // "$$" / "\[" line opening a multi-line one.
+    const displayTex = matchDisplayMathLine(line);
+    const fenceClose = displayTex === null ? displayMathFenceClose(line) : null;
+    if (displayTex !== null || fenceClose !== null) {
+      flushList(String(index));
+      let tex = displayTex ?? "";
+      let next = index + 1;
+      if (fenceClose !== null) {
+        const body: string[] = [];
+        while (next < lines.length && lines[next].trim() !== fenceClose) body.push(lines[next++]);
+        tex = body.join("\n").trim();
+        next = Math.min(next + 1, lines.length);
+      }
+      blocks.push(
+        <div key={index} className="text-zinc-900 dark:text-zinc-100">
+          <MathFormula tex={tex} display />
+        </div>,
       );
       index = next;
       continue;

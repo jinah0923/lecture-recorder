@@ -4,6 +4,8 @@ import { AccountButton } from "@/components/AccountButton";
 import { AuthProvider } from "@/components/AuthProvider";
 import { ServiceWorkerRegister } from "@/components/ServiceWorkerRegister";
 import { ThemeToggle } from "@/components/ThemeToggle";
+// Formula styles and fonts for the KaTeX output in lib/markdown.tsx.
+import "katex/dist/katex.min.css";
 import "./globals.css";
 
 export const metadata: Metadata = {
