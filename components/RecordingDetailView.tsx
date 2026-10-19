@@ -58,6 +58,7 @@ import type {
 } from "@/lib/types";
 
 const MERGE_PROGRESS_TEXT = "기존 녹음 스크립트와 새 자료를 병합하여 단권화 중입니다...";
+const SCRIPT_ONLY_PROGRESS_TEXT = "기존 녹음 스크립트만으로 강의노트를 다시 만드는 중입니다...";
 const MAX_MERGE_FILES = 5;
 
 function isPdfFile(file: File): boolean {
@@ -744,7 +745,8 @@ export function RecordingDetailView({
 
   // ---- "📄 자료 추가해서 다시 분석" (app/api/merge-material) ----
   // Rebuilds the note from the existing transcript plus newly picked
-  // material; the recording itself is never re-analyzed.
+  // material — or from the transcript alone ("자료 없이 스크립트만 재분석");
+  // the recording itself is never re-analyzed. null = modal closed.
   const [pendingMergeFiles, setPendingMergeFiles] = useState<File[] | null>(null);
   const [mergeProgress, setMergeProgress] = useState<string | null>(null);
   const isMergingRef = useRef(false);
@@ -755,8 +757,13 @@ export function RecordingDetailView({
     syncToastTimerRef.current = window.setTimeout(() => setSyncToast(null), ms);
   }, []);
 
-  function handleMergeMaterial(files: File[]) {
-    if (files.length > MAX_MERGE_FILES) {
+  function handleMergeMaterial() {
+    setPendingMergeFiles([]);
+  }
+
+  function handleMergeFilesPicked(files: File[]) {
+    const current = pendingMergeFiles ?? [];
+    if (current.length + files.length > MAX_MERGE_FILES) {
       showSyncToast(`자료는 한 번에 최대 ${MAX_MERGE_FILES}개까지 추가할 수 있어요.`, 4000);
       return;
     }
@@ -764,7 +771,7 @@ export function RecordingDetailView({
       showSyncToast("PDF 또는 이미지 파일만 추가할 수 있어요.", 4000);
       return;
     }
-    setPendingMergeFiles(files);
+    setPendingMergeFiles([...current, ...files]);
   }
 
   // Waits for a merge job and applies its result. Also what resumes a merge
@@ -773,7 +780,7 @@ export function RecordingDetailView({
     async (jobId: string, fileNames: string[]) => {
       if (isMergingRef.current) return;
       isMergingRef.current = true;
-      setMergeProgress(MERGE_PROGRESS_TEXT);
+      setMergeProgress(fileNames.length > 0 ? MERGE_PROGRESS_TEXT : SCRIPT_ONLY_PROGRESS_TEXT);
       try {
         const result = await pollJobUntilDone(jobId, (status) => {
           if (status.status === "processing" && status.stage) setMergeProgress(status.stage);
@@ -809,15 +816,21 @@ export function RecordingDetailView({
         await saveSession(latestSnapshotRef.current({ aiResult: nextAiResult, referenceFileNames: nextReferenceNames }));
         onSessionSaved();
         await pushLocalSessions().catch(() => {});
-        showSyncToast("✓ 새 자료를 반영해 강의노트를 다시 만들었습니다.", 4000);
+        showSyncToast(
+          fileNames.length > 0
+            ? "✓ 새 자료를 반영해 강의노트를 다시 만들었습니다."
+            : "✓ 녹음 스크립트만으로 강의노트를 다시 만들었습니다.",
+          4000,
+        );
       } catch (error) {
         clearStoredMergeJob(sessionId);
-        const message = error instanceof Error ? error.message : "자료 병합 분석에 실패했습니다.";
+        const failureLabel = fileNames.length > 0 ? "자료 병합 분석" : "스크립트 재분석";
+        const message = error instanceof Error ? error.message : `${failureLabel}에 실패했습니다.`;
         const blocked = parseProhibitedContentError(message);
         if (blocked) {
           setPolicyBlock(blocked);
         } else {
-          setPollFailureToast(`자료 병합 분석 실패: ${message}`);
+          setPollFailureToast(`${failureLabel} 실패: ${message}`);
           if (pollFailureToastTimerRef.current) window.clearTimeout(pollFailureToastTimerRef.current);
           pollFailureToastTimerRef.current = window.setTimeout(() => setPollFailureToast(null), 10000);
         }
@@ -829,9 +842,12 @@ export function RecordingDetailView({
     [sessionId, onSessionSaved, showSyncToast],
   );
 
+  // No files = "자료 없이 스크립트만 재분석": nothing uploaded, no slides
+  // sent, the server re-runs only the text analysis on the saved transcript.
   async function runMerge(files: File[]) {
     setPendingMergeFiles(null);
     if (!aiResult || mergeProgress) return;
+    const scriptOnly = files.length === 0;
     try {
       // The server reads the transcript from the cloud copy when signed in —
       // make sure that copy is this device's latest first.
@@ -866,9 +882,9 @@ export function RecordingDetailView({
           await uploadFileToBlob(file, file.name, file.type || (isPdfFile(file) ? "application/pdf" : "image/jpeg")),
         );
       }
-      const slideThumbnails = allSlides.length > 0 ? await buildSlideThumbnails(allSlides) : [];
+      const slideThumbnails = !scriptOnly && allSlides.length > 0 ? await buildSlideThumbnails(allSlides) : [];
 
-      setMergeProgress(MERGE_PROGRESS_TEXT);
+      setMergeProgress(scriptOnly ? SCRIPT_ONLY_PROGRESS_TEXT : MERGE_PROGRESS_TEXT);
       const jobId = await startMergeMaterialJob({
         sessionId,
         referenceBlobs,
@@ -876,6 +892,7 @@ export function RecordingDetailView({
         keywords,
         bookmarks,
         transcript: aiResult.transcript,
+        ...(scriptOnly ? { scriptOnly: true } : {}),
       });
       const fileNames = files.map((file) => file.name);
       setStoredMergeJob(sessionId, { jobId, fileNames });
@@ -883,8 +900,9 @@ export function RecordingDetailView({
     } catch (error) {
       console.error("자료 병합 분석 시작 실패:", error);
       setMergeProgress(null);
-      const message = error instanceof Error ? error.message : "자료 병합 분석을 시작하지 못했습니다.";
-      setPollFailureToast(`자료 병합 분석 실패: ${message}`);
+      const failureLabel = scriptOnly ? "스크립트 재분석" : "자료 병합 분석";
+      const message = error instanceof Error ? error.message : `${failureLabel}을 시작하지 못했습니다.`;
+      setPollFailureToast(`${failureLabel} 실패: ${message}`);
       if (pollFailureToastTimerRef.current) window.clearTimeout(pollFailureToastTimerRef.current);
       pollFailureToastTimerRef.current = window.setTimeout(() => setPollFailureToast(null), 10000);
     }
@@ -1221,7 +1239,12 @@ export function RecordingDetailView({
       {pendingMergeFiles && (
         <MergeMaterialModal
           files={pendingMergeFiles}
+          onFilesPicked={handleMergeFilesPicked}
+          onRemoveFile={(index) =>
+            setPendingMergeFiles((current) => (current ? current.filter((_file, i) => i !== index) : current))
+          }
           onConfirm={() => void runMerge(pendingMergeFiles)}
+          onScriptOnly={() => void runMerge([])}
           onCancel={() => setPendingMergeFiles(null)}
         />
       )}

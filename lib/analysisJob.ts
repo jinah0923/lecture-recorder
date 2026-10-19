@@ -188,6 +188,8 @@ export type MergeMaterialPayload = {
   keywords: string[];
   bookmarks: unknown[];
   transcript: TranscriptSegment[];
+  // "자료 없이 스크립트만 재분석" — referenceBlobs is then empty.
+  scriptOnly?: boolean;
 };
 
 export async function startMergeMaterialJob(payload: MergeMaterialPayload): Promise<string> {

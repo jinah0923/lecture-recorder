@@ -38,6 +38,13 @@ import type { BlockedChunkNotice, TranscriptSegment } from "@/lib/types";
 // after() and returns a jobId; the client polls transcribe-and-summarize's
 // GET ?jobId= (shared `job:{id}` record). The result carries the new
 // summary/lectureNote/checklist; the client keeps its own transcript.
+//
+// scriptOnly: "자료 없이 스크립트만 재분석" — no files at all, just the saved
+// transcript through the text analysis step again (e.g. after a cut-off note
+// or a prompt update). With zero reference files buildAnalysisPrompt drops the
+// 교재 중심(Core Backbone) rules and writes a plain 단권화 note; no audio model
+// and no speech-to-text are involved either way. The cut-off note repair
+// (lib/noteCompletion.ts) runs inside callAnalysisWorker, so it covers both.
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -55,7 +62,12 @@ type MergeRequestBody = {
   // The browser's own copy — used only when the transcript can't be read
   // from the cloud (signed out, or the session was never synced).
   transcript?: unknown;
+  // true = re-analyze the transcript alone; referenceBlobs must be empty.
+  scriptOnly?: unknown;
 };
+
+const MERGE_STAGE = "기존 녹음 스크립트와 새 자료를 병합하여 단권화 중입니다...";
+const SCRIPT_ONLY_STAGE = "기존 녹음 스크립트만으로 강의노트를 다시 만드는 중입니다...";
 
 function isTranscriptSegment(value: unknown): value is TranscriptSegment {
   const s = value as Partial<TranscriptSegment> | null;
@@ -91,10 +103,12 @@ async function runMergeJob(
   const ai = new GoogleGenAI({ apiKey });
   let uploadedReferences: GenAiFile[] = [];
   try {
-    await reportStage(jobId, "새 자료를 AI에 올리는 중...");
-    uploadedReferences = await uploadReferenceFiles(ai, apiKey, referenceBlobs);
+    if (referenceBlobs.length > 0) {
+      await reportStage(jobId, "새 자료를 AI에 올리는 중...");
+      uploadedReferences = await uploadReferenceFiles(ai, apiKey, referenceBlobs);
+    }
 
-    await reportStage(jobId, "기존 녹음 스크립트와 새 자료를 병합하여 단권화 중입니다...");
+    await reportStage(jobId, referenceBlobs.length > 0 ? MERGE_STAGE : SCRIPT_ONLY_STAGE);
     const segments = transcriptToCheckpointSegments(transcript);
     const analysis = await callAnalysisWorker(
       ai,
@@ -142,17 +156,24 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "세션 정보가 전달되지 않았습니다." }, { status: 400 });
   }
 
+  const scriptOnly = body.scriptOnly === true;
   const referenceBlobs = Array.isArray(body.referenceBlobs)
     ? body.referenceBlobs.map(parseBlobRef).filter((ref): ref is BlobRef => ref !== null)
     : [];
-  if (referenceBlobs.length === 0) {
+  // Explicit either way, so a merge whose uploads went missing fails loudly
+  // instead of quietly turning into a script-only run.
+  if (scriptOnly && referenceBlobs.length > 0) {
+    return NextResponse.json({ error: "스크립트만 재분석할 때는 자료 파일을 함께 보낼 수 없습니다." }, { status: 400 });
+  }
+  if (!scriptOnly && referenceBlobs.length === 0) {
     return NextResponse.json({ error: "추가할 자료 파일이 전달되지 않았습니다." }, { status: 400 });
   }
   if (referenceBlobs.length > MAX_REFERENCE_FILES) {
     return NextResponse.json({ error: `자료는 최대 ${MAX_REFERENCE_FILES}개까지만 추가할 수 있습니다.` }, { status: 400 });
   }
 
-  const slideThumbnails: IncomingSlideThumbnail[] = Array.isArray(body.slideThumbnails)
+  // Script-only means text only — earlier slides aren't sent back in either.
+  const slideThumbnails: IncomingSlideThumbnail[] = !scriptOnly && Array.isArray(body.slideThumbnails)
     ? body.slideThumbnails.filter(
         (item): item is IncomingSlideThumbnail =>
           !!item && typeof item.page === "number" && typeof item.dataUrl === "string",
@@ -186,7 +207,11 @@ export async function POST(request: Request) {
   }
   if (!loaded) {
     return NextResponse.json(
-      { error: "이 노트의 음성 인식 스크립트를 찾을 수 없어 병합할 수 없습니다. 먼저 녹음을 분석해주세요." },
+      {
+        error: scriptOnly
+          ? "이 노트의 음성 인식 스크립트를 찾을 수 없어 다시 분석할 수 없습니다. 먼저 녹음을 분석해주세요."
+          : "이 노트의 음성 인식 스크립트를 찾을 수 없어 병합할 수 없습니다. 먼저 녹음을 분석해주세요.",
+      },
       { status: 404 },
     );
   }
@@ -195,7 +220,7 @@ export async function POST(request: Request) {
   await writeJobRecord(jobId, {
     status: "processing",
     createdAt: Date.now(),
-    stage: "기존 녹음 스크립트와 새 자료를 병합하여 단권화 중입니다...",
+    stage: scriptOnly ? SCRIPT_ONLY_STAGE : MERGE_STAGE,
   });
   const { transcript, blockedChunks } = loaded;
 
@@ -220,7 +245,7 @@ export async function POST(request: Request) {
       await writeJobRecord(jobId, {
         status: "error",
         createdAt: Date.now(),
-        error: error instanceof Error ? error.message : "자료 병합 분석에 실패했습니다.",
+        error: error instanceof Error ? error.message : scriptOnly ? "스크립트 재분석에 실패했습니다." : "자료 병합 분석에 실패했습니다.",
       });
     }
   });

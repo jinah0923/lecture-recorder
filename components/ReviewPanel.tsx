@@ -35,8 +35,8 @@ type ReviewPanelProps = {
   onSaveLectureNoteNow: (nextLectureNote: string) => Promise<void>;
   onUpdateTranscript: (nextTranscript: TranscriptSegment[]) => void;
   onSegmentCommitted?: (oldText: string, newText: string) => void;
-  /** "📄 자료 추가해서 다시 분석": files the user picked, for the caller to confirm and merge. */
-  onMergeMaterial?: (files: File[]) => void;
+  /** "📄 자료 추가해서 다시 분석": opens the caller's modal (pick material, or re-analyze the script alone). */
+  onMergeMaterial?: () => void;
   /** Progress text while a merge re-analysis runs; null when idle. */
   mergeProgress?: string | null;
   /** Page number -> cached slide image, for `![슬라이드 N](slide_N)` placeholders. */
@@ -160,14 +160,6 @@ export function ReviewPanel({
   useEffect(() => {
     void import("katex/contrib/copy-tex");
   }, []);
-  const mergeInputRef = useRef<HTMLInputElement>(null);
-
-  function handleMergeFilesPicked(event: ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(event.target.files ?? []);
-    // Cleared so picking the same file again still fires onChange.
-    event.target.value = "";
-    if (files.length > 0) onMergeMaterial?.(files);
-  }
   const [noteCopyLabel, setNoteCopyLabel] = useState("클립보드 복사");
 
   // Manual-edit mode for the lecture note — operates on aiResult.lectureNote
@@ -487,27 +479,15 @@ export function ReviewPanel({
               </button>
             )}
             {onMergeMaterial && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => mergeInputRef.current?.click()}
-                  disabled={!!mergeProgress || isEditingNote}
-                  title="녹음은 다시 분석하지 않고, 기존 스크립트에 교안·교재를 합쳐 노트를 새로 만듭니다"
-                  className="rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700 transition hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-indigo-900 dark:bg-indigo-950/40 dark:text-indigo-300 dark:hover:bg-indigo-900/50"
-                >
-                  📄 자료 추가해서 다시 분석
-                </button>
-                <input
-                  ref={mergeInputRef}
-                  type="file"
-                  accept=".pdf,application/pdf,image/*"
-                  multiple
-                  onChange={handleMergeFilesPicked}
-                  className="hidden"
-                  aria-hidden="true"
-                  tabIndex={-1}
-                />
-              </>
+              <button
+                type="button"
+                onClick={onMergeMaterial}
+                disabled={!!mergeProgress || isEditingNote}
+                title="녹음은 다시 분석하지 않고, 기존 스크립트에 교안·교재를 합치거나 스크립트만으로 노트를 새로 만듭니다"
+                className="rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700 transition hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-indigo-900 dark:bg-indigo-950/40 dark:text-indigo-300 dark:hover:bg-indigo-900/50"
+              >
+                📄 자료 추가해서 다시 분석
+              </button>
             )}
           </div>
         </div>
