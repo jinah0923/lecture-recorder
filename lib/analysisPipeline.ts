@@ -7,6 +7,7 @@
 
 import { stripMarkTags } from "@/lib/inlineMarkdown";
 import { stripNoteEndMarker } from "@/lib/noteCompletion";
+import { ensureOverviewMindmap } from "@/lib/overviewMindmap";
 import { getRedisClient } from "@/lib/redis";
 import type {
   AiResult,
@@ -275,10 +276,12 @@ export function buildAnalysisResult(
   const fullText = transcript.map((segment) => segment.text).join(" ").trim();
   const summary = typeof analysisResult.summary === "string" ? fixEscapedNewlines(analysisResult.summary.trim()) : "";
   // The end marker is normally removed by completeTruncatedNote already;
-  // stripped again here so it can never reach a saved note.
+  // stripped again here so it can never reach a saved note. Every path (both
+  // engines, merge, script-only) ends here, so this is also where a missing
+  // overview mindmap is filled in from the note's headings.
   const lectureNote =
     typeof analysisResult.lectureNote === "string"
-      ? stripNoteEndMarker(fixEscapedNewlines(analysisResult.lectureNote.trim()))
+      ? ensureOverviewMindmap(stripNoteEndMarker(fixEscapedNewlines(analysisResult.lectureNote.trim())))
       : "";
   const checklistTexts = Array.isArray(analysisResult.checklist)
     ? analysisResult.checklist.filter((item): item is string => typeof item === "string")
