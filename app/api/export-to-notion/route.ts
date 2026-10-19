@@ -8,6 +8,7 @@ import { displayMathFenceClose, matchDisplayMathLine, protectMath, splitMathPlac
 import {
   EQUATION_MARKER,
   buildListTree,
+  indentedListAfterBlank,
   isCodeFence,
   matchEquationLine,
   matchQuoteLine,
@@ -383,6 +384,9 @@ function convertLectureNoteToBlocks(markdown: string): BlockNode[] {
     if (parseListLine(lines[index])) {
       const items: ListLine[] = [];
       while (index < lines.length) {
+        // A blank line between a bullet and its sub-bullets doesn't end the list.
+        const resume = lines[index].trim() ? null : indentedListAfterBlank(lines, index);
+        if (resume !== null) index = resume;
         const item = parseListLine(lines[index]);
         if (!item) break;
         items.push(item);

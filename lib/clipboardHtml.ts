@@ -17,6 +17,7 @@ import {
 } from "@/lib/inlineMath";
 import {
   buildListTree,
+  indentedListAfterBlank,
   isCodeFence,
   matchEquationLine,
   matchQuoteLine,
@@ -122,6 +123,12 @@ export function markdownToClipboardHtml(markdown: string): string {
     const line = rawLine.trim();
 
     if (!line) {
+      // A blank line between a bullet and its sub-bullets doesn't end the list.
+      const resume = list.length > 0 ? indentedListAfterBlank(lines, index) : null;
+      if (resume !== null) {
+        index = resume;
+        continue;
+      }
       flushList();
       index++;
       continue;

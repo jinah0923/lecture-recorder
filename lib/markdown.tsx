@@ -10,6 +10,7 @@ import { displayMathFenceClose, matchDisplayMathLine, protectMath, splitMathPlac
 import type { MathSpan } from "@/lib/inlineMath";
 import {
   buildListTree,
+  indentedListAfterBlank,
   isCodeFence,
   matchEquationLine,
   matchQuoteLine,
@@ -293,6 +294,12 @@ export function renderMarkdown(markdown: string, slideImages?: Map<number, strin
     const line = rawLine.trim();
 
     if (!line) {
+      // A blank line between a bullet and its sub-bullets doesn't end the list.
+      const resume = listBuffer.length > 0 ? indentedListAfterBlank(lines, index) : null;
+      if (resume !== null) {
+        index = resume;
+        continue;
+      }
       flushList(String(index));
       index++;
       continue;

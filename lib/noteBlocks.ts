@@ -85,6 +85,20 @@ export function parseListLine(rawLine: string): ListLine | null {
   return { depth: Math.floor(indentWidth(rawLine) / 2), ordered: !!ordered, marker: match[1], text: match[2] };
 }
 
+// The AI sometimes leaves a blank line between a bullet and its sub-bullets.
+// Read strictly, that blank line ends the list and the sub-bullets come out
+// as a separate, top-level list. So when lines[index] starts a run of blank
+// lines that is followed by an *indented* list line, the list carries on:
+// this returns that line's index (callers skip the blanks), otherwise null.
+// An unindented bullet after a blank line still starts a new list.
+export function indentedListAfterBlank(lines: string[], index: number): number | null {
+  let cursor = index;
+  while (cursor < lines.length && !lines[cursor].trim()) cursor++;
+  if (cursor === index || cursor >= lines.length) return null;
+  const item = parseListLine(lines[cursor]);
+  return item && item.depth > 0 ? cursor : null;
+}
+
 // Turns a flat, depth-tagged run of list lines into a proper tree — each
 // item's children are whatever immediately-following items sit at a
 // strictly greater depth, matching standard nested-markdown-list semantics.
@@ -127,7 +141,18 @@ export function toNotionPasteMarkdown(markdown: string): string {
   const out: string[] = [];
   const stack: number[] = [];
   let inFence = false;
-  for (const rawLine of markdown.split("\n")) {
+  const lines = markdown.split("\n");
+  for (let index = 0; index < lines.length; index++) {
+    const rawLine = lines[index];
+    // Blank lines inside a list (see indentedListAfterBlank) are dropped so
+    // the pasted list stays one nested list.
+    if (!inFence && stack.length > 0 && !rawLine.trim()) {
+      const resume = indentedListAfterBlank(lines, index);
+      if (resume !== null) {
+        index = resume - 1;
+        continue;
+      }
+    }
     if (isCodeFence(rawLine)) inFence = !inFence;
     if (inFence || isCodeFence(rawLine)) {
       stack.length = 0;
