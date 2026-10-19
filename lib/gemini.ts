@@ -11,6 +11,11 @@ import { PROHIBITED_CONTENT_MESSAGE } from "@/lib/geminiMessages";
 // are opened fully. This does NOT disable Google's non-configurable
 // protections — a request can still come back blocked with a reason like
 // PROHIBITED_CONTENT or BLOCKLIST, which readResponseText reports as such.
+// The output ceiling of the Gemini Flash models this app uses — every call
+// that can produce a long note asks for all of it. (A lossless 단권화 note of
+// a long lecture is tens of thousands of tokens.)
+export const GEMINI_MAX_OUTPUT_TOKENS = 65_536;
+
 export const SAFETY_SETTINGS: SafetySetting[] = [
   HarmCategory.HARM_CATEGORY_HARASSMENT,
   HarmCategory.HARM_CATEGORY_HATE_SPEECH,

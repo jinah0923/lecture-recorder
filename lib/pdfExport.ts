@@ -371,7 +371,7 @@ export function renderMarkdownToHtml(markdown: string, slideImages?: Map<number,
     }
     flushList();
 
-    const headingMatch = line.match(/^(#{1,4})\s+(.*)$/);
+    const headingMatch = line.match(/^(#{1,6})\s+(.*)$/);
     if (headingMatch) {
       const level = headingMatch[1].length;
       blocks.push(
@@ -465,7 +465,7 @@ export function renderMarkdownToHtml(markdown: string, slideImages?: Map<number,
         const nextLine = lines[cursor].trim();
         if (!nextLine) break;
         if (parseListLine(nextLine)) break;
-        if (/^#{1,4}\s+/.test(nextLine)) break;
+        if (/^#{1,6}\s+/.test(nextLine)) break;
         if (nextLine.startsWith("|")) break;
         if (SLIDE_IMAGE_PATTERN.test(nextLine) || IMAGE_PATTERN.test(nextLine)) break;
         if (detectCallout(nextLine)) break;

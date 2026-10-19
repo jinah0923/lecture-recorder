@@ -1,4 +1,5 @@
 import { NextResponse, after } from "next/server";
+import { runWithJobDeadline } from "@/lib/jobDeadline";
 import { del } from "@vercel/blob";
 import { GoogleGenAI } from "@google/genai";
 import type { File as GenAiFile } from "@google/genai";
@@ -200,15 +201,19 @@ export async function POST(request: Request) {
 
   after(async () => {
     try {
-      const result = await runMergeJob(
-        apiKey,
-        jobId,
-        transcript,
-        blockedChunks,
-        referenceBlobs,
-        slideThumbnails,
-        keywords,
-        bookmarks,
+      // Bounded by maxDuration — lets optional steps (continuing a cut-off
+      // note, lib/noteCompletion.ts) skip themselves when time is short.
+      const result = await runWithJobDeadline(maxDuration, () =>
+        runMergeJob(
+          apiKey,
+          jobId,
+          transcript,
+          blockedChunks,
+          referenceBlobs,
+          slideThumbnails,
+          keywords,
+          bookmarks,
+        ),
       );
       await writeJobRecord(jobId, { status: "completed", createdAt: Date.now(), result });
     } catch (error) {

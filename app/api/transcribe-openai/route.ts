@@ -1,4 +1,5 @@
 import { NextResponse, after } from "next/server";
+import { runWithJobDeadline } from "@/lib/jobDeadline";
 import { del, get } from "@vercel/blob";
 import {
   MAX_AUDIO_CHUNKS,
@@ -302,17 +303,21 @@ export async function POST(request: Request) {
 
   after(async () => {
     try {
-      const result = await runOpenAiJob(
-        apiKey,
-        jobId,
-        sessionId,
-        audioBlobRef,
-        audioChunks,
-        referenceTexts,
-        referenceImages,
-        bookmarks,
-        keywords,
-        fallbackReason,
+      // Bounded by maxDuration — lets optional steps (continuing a cut-off
+      // note, lib/noteCompletion.ts) skip themselves when time is short.
+      const result = await runWithJobDeadline(maxDuration, () =>
+        runOpenAiJob(
+          apiKey,
+          jobId,
+          sessionId,
+          audioBlobRef,
+          audioChunks,
+          referenceTexts,
+          referenceImages,
+          bookmarks,
+          keywords,
+          fallbackReason,
+        ),
       );
       await writeJobRecord(jobId, { status: "completed", createdAt: Date.now(), result });
       await deleteSttCheckpoint(sessionId, "openai");

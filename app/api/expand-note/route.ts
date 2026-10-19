@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { ApiError, GoogleGenAI, Type, createPartFromBase64, createUserContent } from "@google/genai";
 import {
   ACADEMIC_CONTEXT_INSTRUCTION,
+  GEMINI_MAX_OUTPUT_TOKENS,
   SAFETY_SETTINGS,
   describeGeminiError as describeSharedGeminiError,
   readResponseText,
@@ -9,6 +10,7 @@ import {
 import type { Part } from "@google/genai";
 import {
   EQUATION_FORMAT_RULE,
+  HEADING_DEPTH_RULE,
   JOURNAL_ENTRY_RULE,
   MERMAID_DIAGRAM_RULE,
   NESTED_LIST_RULE,
@@ -312,6 +314,7 @@ export async function POST(request: Request) {
       "블록이며, 절대로 기존 문장을 삭제하거나 덮어쓰는 용도로 쓰이지 않습니다 — 이 사실을 항상 염두에 두고 " +
       "작성하세요.",
     LATEX_BAN_RULE,
+    HEADING_DEPTH_RULE,
     NESTED_LIST_RULE,
     EQUATION_FORMAT_RULE,
     JOURNAL_ENTRY_RULE,
@@ -411,6 +414,7 @@ export async function POST(request: Request) {
         systemInstruction,
         responseMimeType: "application/json",
         responseSchema: buildResponseSchema(mode),
+        maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
         safetySettings: SAFETY_SETTINGS,
       },
     });

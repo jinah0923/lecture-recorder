@@ -4,6 +4,7 @@
 
 import { ANALYSIS_FIELD_DESCRIPTIONS } from "@/lib/analysisPrompt";
 import type { CheckpointSegment, RawAnalysisResponse } from "@/lib/analysisPipeline";
+import { buildContinuationPrompt, completeTruncatedNote } from "@/lib/noteCompletion";
 
 const OPENAI_API_BASE_URL = "https://api.openai.com/v1";
 export const OPENAI_STT_MODEL = "whisper-1";
@@ -13,9 +14,25 @@ export const OPENAI_STT_MODEL = "whisper-1";
 export function openAiAnalysisModel(): string {
   return process.env.OPENAI_ANALYSIS_MODEL?.trim() || "gpt-4o-mini";
 }
+// Each model's own output ceiling — the request always asks for all of it
+// (asking for more than a model supports is a 400). Longest prefix wins.
+const OPENAI_OUTPUT_TOKEN_CEILINGS: [prefix: string, maxTokens: number][] = [
+  ["gpt-4o", 16_384],
+  ["gpt-4.1", 32_768],
+  ["o1-mini", 65_536],
+  ["o1", 100_000],
+  ["o3", 100_000],
+  ["o4-mini", 100_000],
+  ["gpt-5", 128_000],
+];
 function openAiMaxOutputTokens(): number {
   const configured = Number(process.env.OPENAI_ANALYSIS_MAX_TOKENS);
-  return Number.isFinite(configured) && configured > 0 ? configured : 16_384;
+  if (Number.isFinite(configured) && configured > 0) return configured;
+  const model = openAiAnalysisModel();
+  const match = OPENAI_OUTPUT_TOKEN_CEILINGS.filter(([prefix]) => model.startsWith(prefix)).sort(
+    (a, b) => b[0].length - a[0].length,
+  )[0];
+  return match ? match[1] : 16_384;
 }
 // Whisper's own per-file upload limit.
 export const WHISPER_MAX_BYTES = 25 * 1024 * 1024;
@@ -196,9 +213,42 @@ export async function analyzeWithOpenAi(
   }
   const text = choice?.message?.content;
   if (!text) throw new Error("OpenAI로부터 강의노트 분석 응답을 받지 못했습니다. 다시 시도해주세요.");
+  let parsed: RawAnalysisResponse;
   try {
-    return JSON.parse(text) as RawAnalysisResponse;
+    parsed = JSON.parse(text) as RawAnalysisResponse;
   } catch {
     throw new Error("OpenAI 분석 응답을 해석하는 데 실패했습니다. 다시 시도해주세요.");
   }
+
+  // Same cut-off repair as the Gemini worker (lib/noteCompletion.ts): the
+  // rest of the note as plain text, over the same inputs.
+  if (typeof parsed.lectureNote === "string") {
+    parsed.lectureNote = await completeTruncatedNote(
+      parsed.lectureNote,
+      async (noteSoFar, lastLine, timeoutMs) => {
+        const continuationResponse = await fetch(`${OPENAI_API_BASE_URL}/chat/completions`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model,
+            messages: [
+              { role: "system", content: systemInstruction },
+              { role: "user", content: [...content, { type: "text", text: buildContinuationPrompt(noteSoFar, lastLine) }] },
+            ],
+            max_completion_tokens: openAiMaxOutputTokens(),
+          }),
+          ...(Number.isFinite(timeoutMs) ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
+        });
+        if (!continuationResponse.ok) {
+          throw new Error(await describeOpenAiFailure(continuationResponse, "강의노트 이어 쓰기"));
+        }
+        const continuationData = (await continuationResponse.json()) as {
+          choices?: { message?: { content?: string | null } }[];
+        };
+        return continuationData.choices?.[0]?.message?.content ?? "";
+      },
+      "openai-analysis",
+    );
+  }
+  return parsed;
 }

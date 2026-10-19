@@ -203,7 +203,7 @@ export function markdownToClipboardHtml(markdown: string): string {
     }
     flushList();
 
-    const heading = line.match(/^(#{1,4})\s+(.*)$/);
+    const heading = line.match(/^(#{1,6})\s+(.*)$/);
     if (heading) {
       const level = Math.min(heading[1].length, 3);
       blocks.push(`<h${level}>${inlineHtml(heading[2])}</h${level}>`);

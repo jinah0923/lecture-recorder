@@ -11,10 +11,12 @@ import type { BlobRef, RawAnalysisResponse } from "@/lib/analysisPipeline";
 import { ANALYSIS_FIELD_DESCRIPTIONS, buildAnalysisPrompt } from "@/lib/analysisPrompt";
 import {
   ACADEMIC_CONTEXT_INSTRUCTION,
+  GEMINI_MAX_OUTPUT_TOKENS,
   SAFETY_SETTINGS,
   describeGeminiError as describeSharedGeminiError,
   readResponseText,
 } from "@/lib/gemini";
+import { buildContinuationPrompt, completeTruncatedNote } from "@/lib/noteCompletion";
 
 export const MODEL = "gemini-3.6-flash";
 // How long to wait for an uploaded file to finish Gemini-side processing
@@ -246,17 +248,43 @@ export async function callAnalysisWorker(
       systemInstruction,
       responseMimeType: "application/json",
       responseSchema: ANALYSIS_RESPONSE_SCHEMA,
-      maxOutputTokens: 65536,
+      maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
       safetySettings: SAFETY_SETTINGS,
     },
   });
 
   const text = readResponseText(response, "강의노트 분석");
+  let parsed: RawAnalysisResponse;
   try {
-    return JSON.parse(text);
+    parsed = JSON.parse(text);
   } catch {
     throw new Error("분석 응답을 해석하는 데 실패했습니다. 다시 시도해주세요.");
   }
+
+  // A note that stopped before its end marker gets the rest written by a
+  // follow-up call over the same inputs (see lib/noteCompletion.ts). Plain
+  // text out, so the continuation isn't squeezed into a JSON string again.
+  if (typeof parsed.lectureNote === "string") {
+    parsed.lectureNote = await completeTruncatedNote(
+      parsed.lectureNote,
+      async (noteSoFar, lastLine, timeoutMs) => {
+        const continuation = await ai.models.generateContent({
+          model: MODEL,
+          contents: createUserContent([...contentParts, buildContinuationPrompt(noteSoFar, lastLine)]),
+          config: {
+            systemInstruction,
+            responseMimeType: "text/plain",
+            maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
+            safetySettings: SAFETY_SETTINGS,
+            ...(Number.isFinite(timeoutMs) ? { abortSignal: AbortSignal.timeout(timeoutMs) } : {}),
+          },
+        });
+        return continuation.text ?? "";
+      },
+      "gemini-analysis",
+    );
+  }
+  return parsed;
 }
 
 // Shared by both paths — reference docs are always uploaded whole

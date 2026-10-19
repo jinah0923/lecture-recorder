@@ -6,6 +6,7 @@
 // transcribe-and-summarize's GET ?jobId= and gets the same result shape.
 
 import { stripMarkTags } from "@/lib/inlineMarkdown";
+import { stripNoteEndMarker } from "@/lib/noteCompletion";
 import { getRedisClient } from "@/lib/redis";
 import type {
   AiResult,
@@ -273,8 +274,12 @@ export function buildAnalysisResult(
 
   const fullText = transcript.map((segment) => segment.text).join(" ").trim();
   const summary = typeof analysisResult.summary === "string" ? fixEscapedNewlines(analysisResult.summary.trim()) : "";
+  // The end marker is normally removed by completeTruncatedNote already;
+  // stripped again here so it can never reach a saved note.
   const lectureNote =
-    typeof analysisResult.lectureNote === "string" ? fixEscapedNewlines(analysisResult.lectureNote.trim()) : "";
+    typeof analysisResult.lectureNote === "string"
+      ? stripNoteEndMarker(fixEscapedNewlines(analysisResult.lectureNote.trim()))
+      : "";
   const checklistTexts = Array.isArray(analysisResult.checklist)
     ? analysisResult.checklist.filter((item): item is string => typeof item === "string")
     : [];

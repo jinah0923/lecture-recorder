@@ -1,8 +1,10 @@
 import { NextResponse, after } from "next/server";
+import { runWithJobDeadline } from "@/lib/jobDeadline";
 import { del, get } from "@vercel/blob";
 import { ApiError, GoogleGenAI, Type, createPartFromUri, createUserContent } from "@google/genai";
 import {
   ACADEMIC_CONTEXT_INSTRUCTION,
+  GEMINI_MAX_OUTPUT_TOKENS,
   PolicyBlockedError,
   SAFETY_SETTINGS,
   readResponseText,
@@ -204,7 +206,7 @@ async function callSttWorker(ai: GoogleGenAI, uploadedAudio: GenAiFile): Promise
       systemInstruction,
       responseMimeType: "application/json",
       responseSchema: STT_RESPONSE_SCHEMA,
-      maxOutputTokens: 65536,
+      maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
       safetySettings: SAFETY_SETTINGS,
     },
   });
@@ -647,16 +649,20 @@ export async function POST(request: Request) {
 
   after(async () => {
     try {
-      const result = await runAnalysisJob(
-        apiKey,
-        jobId,
-        sessionId,
-        audioBlobRef,
-        referenceBlobRefs,
-        bookmarks,
-        keywords,
-        slideThumbnails,
-        audioChunks,
+      // Bounded by maxDuration — lets optional steps (continuing a cut-off
+      // note, lib/noteCompletion.ts) skip themselves when time is short.
+      const result = await runWithJobDeadline(maxDuration, () =>
+        runAnalysisJob(
+          apiKey,
+          jobId,
+          sessionId,
+          audioBlobRef,
+          referenceBlobRefs,
+          bookmarks,
+          keywords,
+          slideThumbnails,
+          audioChunks,
+        ),
       );
       await writeJobRecord(jobId, { status: "completed", createdAt: Date.now(), result });
       // The checkpoint's only job was protecting against a STAGE 2 failure

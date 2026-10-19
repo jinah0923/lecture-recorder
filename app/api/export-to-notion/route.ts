@@ -365,7 +365,7 @@ function convertLectureNoteToBlocks(markdown: string): BlockNode[] {
       continue;
     }
 
-    const headingMatch = line.match(/^(#{1,4})\s+(.*)$/);
+    const headingMatch = line.match(/^(#{1,6})\s+(.*)$/);
     if (headingMatch) {
       const level = headingMatch[1].length;
       const richText = buildRichText(headingMatch[2]);

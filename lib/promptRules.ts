@@ -64,6 +64,21 @@ export const JOURNAL_ENTRY_RULE = [
   "- 계정과목 명칭은 [원본 워딩 최우선 보존] 규칙대로 교수가 말한(또는 자료에 적힌) 그대로 쓰세요.",
 ].join("\n");
 
+// Notes were digging down to "##### 2.1 학습욕구이론" (H5). The note's
+// structure is two levels — "## 1. 대주제" / "### 1.1 소주제" — and anything
+// finer belongs in bullets. (The renderers also cap a deeper heading at H4's
+// style, so one that slips through still reads as a heading.) Shared with the
+// deep-dive writer, whose blocks merge into the same note.
+export const HEADING_DEPTH_RULE = [
+  "[제목(헤더) 깊이 제한 — 엄격히 준수] 마크다운 제목은 최대 `###`(H3, 소주제)까지만 사용하세요. `####`, `#####`, " +
+    "`######`(H4~H6)는 절대 쓰지 마세요.",
+  "- 제목 체계는 `## 1. 대주제` → `### 1.1 소주제` 두 단계뿐입니다. 소주제보다 더 잘게 나눠야 하는 내용(예: `2.1` 아래의 " +
+    "세부 이론, 하위 항목)은 제목을 더 만들지 말고 불릿(`-`)으로 쓰세요 — 필요하면 `- **세부 주제명**` 처럼 굵게 표시한 " +
+    "불릿을 소제목처럼 쓰고, 그 내용은 아래 [불릿 계층 구조] 규칙대로 들여쓴 하위 불릿으로 작성하세요.",
+  "- 잘못된 예: `##### 2.1 학습욕구이론` / 올바른 예: `### 2.1 학습욕구이론` (2번 대주제의 소주제인 경우) 또는 " +
+    "`- **학습욕구이론**` (소주제 안의 세부 항목인 경우).",
+].join("\n");
+
 // Sub-points ("Secretin", "CCK" under "두 가지 핵심 호르몬:") were coming out
 // at the same level as their parent, so a topic and its details read as one
 // flat list. The renderers nest by indentation (parseListLine in
