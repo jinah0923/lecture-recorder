@@ -64,6 +64,31 @@ export const JOURNAL_ENTRY_RULE = [
   "- 계정과목 명칭은 [원본 워딩 최우선 보존] 규칙대로 교수가 말한(또는 자료에 적힌) 그대로 쓰세요.",
 ].join("\n");
 
+// Sub-points ("Secretin", "CCK" under "두 가지 핵심 호르몬:") were coming out
+// at the same level as their parent, so a topic and its details read as one
+// flat list. The renderers nest by indentation (parseListLine in
+// lib/noteBlocks.ts: 4 spaces or a tab per level) and a blank line ends the
+// list, which is why both are spelled out. Shared with the deep-dive writer,
+// whose blocks merge into the same note.
+export const NESTED_LIST_RULE = [
+  "[불릿 계층 구조(들여쓰기) 엄수] 불릿(글머리 기호)을 모두 같은 레벨로 나열하지 말고, 내용의 논리적 위계를 들여쓰기로 " +
+    "분명히 나누세요.",
+  "- 상위 개념(예: `- 두 가지 핵심 호르몬:`) 아래에 딸린 하위 개념(예: Secretin, CCK)은 반드시 공백 4칸을 들여쓴 하위 " +
+    "불릿(`    - `)으로 쓰세요. 하위 개념에 또 딸린 세부 내용은 공백 4칸을 더 들여쓰세요(8칸, 12칸 …).",
+  "- 서로 독립적인 주제(예: '분해 과정', '흡수 및 전신 순환')는 앞 주제의 하위 불릿 밑에 이어 붙이지 말고, 앞 주제의 " +
+    "상위 개념과 같은 레벨의 불릿으로 새로 시작해 내용이 섞이지 않게 하세요.",
+  "- 예시 구조(그대로 따를 것):\n" +
+    "- 두 가지 핵심 호르몬:\n" +
+    "    - Secretin: (설명)\n" +
+    "    - CCK: (설명)\n" +
+    "- 분해 과정: (설명)\n" +
+    "    - (세부 단계)\n" +
+    "- 흡수 및 전신 순환: (설명)",
+  "- 들여쓰기는 공백 4칸(또는 탭 1개)을 한 단계로 일정하게 쓰고, 불릿 기호는 `-`를 쓰세요(번호 목록 `1.`의 하위 항목도 " +
+    "같은 방식으로 들여쓰기). 상위 불릿과 하위 불릿 사이, 같은 목록의 불릿 사이에는 빈 줄을 넣지 마세요 — 빈 줄이 들어가면 " +
+    "목록이 끊겨 하위 불릿이 상위와 같은 레벨로 표시됩니다.",
+].join("\n");
+
 // Diagrams in the lecture material (mind maps, flowcharts, hierarchies, cause
 // and effect figures) were being dropped as "[도식 참조]" or flattened into a
 // table. The note renderers draw ```mermaid blocks (components/MermaidDiagram.tsx,
