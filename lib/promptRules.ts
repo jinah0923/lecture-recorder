@@ -64,6 +64,22 @@ export const JOURNAL_ENTRY_RULE = [
   "- 계정과목 명칭은 [원본 워딩 최우선 보존] 규칙대로 교수가 말한(또는 자료에 적힌) 그대로 쓰세요.",
 ].join("\n");
 
+// The note screen pages on "## " headings (lib/notePagination.ts). Some
+// notes came back with one "##" over everything, or only "###" headings,
+// and showed as one endless page while others split nicely — so the number
+// and level of the major topics is pinned down here.
+export const MAJOR_TOPIC_RULE = [
+  "[대주제(##) 분할 — 페이지 나누기 기준, 엄격히 준수] 강의의 길이나 성격에 상관없이, 전체 내용을 반드시 논리적인 " +
+    "3~5개의 대주제로 균형 있게 나누세요. 각 대주제는 무조건 줄 맨 앞의 `## `(H2)로 시작해야 합니다 — 이 `## ` 제목이 " +
+    "화면에서 강의노트를 여러 페이지로 나누는 기준점(Pagination)이라는 것을 절대 잊지 마세요.",
+  "- 금지: 전체 내용을 단 하나의 `## ` 아래에 통째로 몰아넣기, 대주제(`## `) 없이 `### ` 이하 제목만으로 문서를 구성하기, " +
+    "한 대주제에 내용 대부분을 몰고 나머지를 몇 줄짜리로 두는 불균형한 분할.",
+  "- 각 대주제 안의 소주제는 `### `(H3)로 나누세요. 교재·교안이 첨부되어 그 목차를 뼈대로 삼을 때는 교재의 장/절 구성을 " +
+    "따르되, 그 경우에도 `## ` 대주제는 최소 3개 이상이 되도록 나누세요(교재 범위가 한 장뿐이면 그 장의 절들을 `## ` 대주제로).",
+  "- 예외: [1부/2부 시간 흐름 구조]가 적용되는 녹음은 그 규칙의 `## 1부` / `## 2부` 두 개가 대주제이며, 각 부 안을 " +
+    "`### ` 소주제로 균형 있게 나누세요.",
+].join("\n");
+
 // Notes were digging down to "##### 2.1 학습욕구이론" (H5). The note's
 // structure is two levels — "## 1. 대주제" / "### 1.1 소주제" — and anything
 // finer belongs in bullets. (The renderers also cap a deeper heading at H4's
