@@ -14,6 +14,8 @@ import {
   NESTED_LIST_RULE,
   VERBATIM_TERMINOLOGY_RULE,
 } from "@/lib/promptRules";
+import { isExpandMode, resolveExpandMode } from "@/lib/expandMode";
+import type { ExpandMode } from "@/lib/expandMode";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -31,7 +33,9 @@ const MAX_TRANSCRIPT_LENGTH = 400_000;
 // the persisted stand-in for the attached PDF — the PDF blob itself is never
 // kept after analysis, only its rendered pages.
 const MAX_SLIDES = 80;
-const NOT_FOUND_MESSAGE = "제공된 강의 자료와 녹음본에서는 해당 내용을 찾을 수 없습니다.";
+const NOT_FOUND_MESSAGE =
+  "제공된 강의 자료와 녹음본에서는 해당 내용을 찾을 수 없습니다. 강의 밖의 설명이 필요하다면 '더 자세히 알려줘'처럼 " +
+  "심화 탐구를 요청해 주세요.";
 const MAX_QUESTION_LENGTH = 500;
 // Comfortably under Gemini's ~20MB total inline-request ceiling — this is a
 // single attached photo (chemical structure, slide, handwriting), not a
@@ -39,32 +43,74 @@ const MAX_QUESTION_LENGTH = 500;
 // Files API's upload/poll-for-ACTIVE dance used for audio/reference docs.
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 
-const RESPONSE_SCHEMA = {
-  type: Type.OBJECT,
-  properties: {
-    foundInSources: {
-      type: Type.BOOLEAN,
-      description:
-        "요청한 내용이 제공된 [강의 녹음 스크립트] / 강의 슬라이드 이미지 / 학습자 첨부 이미지 / [기존 강의노트] 안에 실제로 " +
-        "존재하면 true. 이 자료들 어디에도 근거가 없어 외부 지식으로만 답할 수 있는 경우 반드시 false",
+// The first line of every deep-dive block, so outside knowledge never passes
+// for something the professor said (see the deepDive mode rules below).
+const DEEP_DIVE_LABEL = "> 📚 심화 해설: 아래 내용에는 강의·교재 밖의 일반 전공 지식으로 보충한 설명이 포함되어 있습니다.";
+const MAX_PREVIOUS_CONTENT_LENGTH = 50_000;
+
+function buildResponseSchema(mode: ExpandMode) {
+  return {
+    type: Type.OBJECT,
+    properties: {
+      foundInSources: {
+        type: Type.BOOLEAN,
+        description:
+          mode === "restore"
+            ? "요청한 내용이 제공된 [강의 녹음 스크립트] / 강의 슬라이드(교재) 이미지 / 학습자 첨부 이미지 / [기존 강의노트] " +
+              "안에 실제로 존재하면 true. 이 자료들 어디에도 근거가 없어 외부 지식으로만 답할 수 있는 경우 반드시 false"
+            : "심화 탐구 모드에서는 항상 true",
+      },
+      anchorText: {
+        type: Type.STRING,
+        description:
+          "기존 강의노트 원문에 실제로 존재하는 문장/제목의 일부를 정확히 그대로 인용 (이 블록이 삽입될 위치 바로 앞부분)",
+      },
+      title: { type: Type.STRING, description: "이 블록이 강의노트에 추가/반영하는 내용을 요약하는 짧은 제목" },
+      content: {
+        type: Type.STRING,
+        description:
+          "기존 강의노트에 자연스럽게 이어붙일 완성형 마크다운 블록. 절대 '① 개념 정의 ② 심층 설명 ③ 실생활 예시' 같은 " +
+          "고정 텍스트 템플릿을 강제하지 말 것 — 대신 기존 강의노트에서 이미 쓰인 마크다운 스타일(표, 불릿, 콜아웃, " +
+          "헤딩 등)을 그대로 따라 작성. " +
+          (mode === "restore"
+            ? "오직 제공된 녹음 스크립트/슬라이드(교재)/첨부 이미지/기존 노트에 있는 내용만 사용(외부 지식 금지). "
+            : `첫 줄은 반드시 '${DEEP_DIVE_LABEL}' 그대로 쓰고, 강의 자료를 출발점으로 전공 지식을 동원해 확장 해설. `) +
+          "시각 자료는 ![슬라이드 N](slide_N) 또는 학습자 첨부 이미지 URL만 사용",
+      },
     },
-    anchorText: {
-      type: Type.STRING,
-      description:
-        "기존 강의노트 원문에 실제로 존재하는 문장/제목의 일부를 정확히 그대로 인용 (이 심화 내용이 삽입될 위치 바로 앞부분)",
-    },
-    title: { type: Type.STRING, description: "이 블록이 강의노트에 추가/반영하는 내용을 요약하는 짧은 제목" },
-    content: {
-      type: Type.STRING,
-      description:
-        "기존 강의노트에 자연스럽게 이어붙일 완성형 마크다운 블록. 절대 '① 개념 정의 ② 심층 설명 ③ 실생활 예시' 같은 " +
-        "고정 텍스트 템플릿을 강제하지 말 것 — 대신 기존 강의노트에서 이미 쓰인 마크다운 스타일(표, 불릿, 콜아웃, " +
-        "헤딩 등)을 그대로 따라 작성. 오직 제공된 녹음 스크립트/슬라이드/첨부 이미지/기존 노트에 있는 내용만 사용(외부 지식 금지). " +
-        "시각 자료는 ![슬라이드 N](slide_N) 또는 학습자 첨부 이미지 URL만 사용",
-    },
-  },
-  required: ["foundInSources", "anchorText", "title", "content"],
-};
+    required: ["foundInSources", "anchorText", "title", "content"],
+  };
+}
+
+// [누락 내용 복원 모드] — the default. Only the learner's own material.
+const RESTORE_MODE_RULES = [
+  "[현재 모드: 누락 내용 복원(Strict Grounding) — 최우선 규칙] 학습자의 요청은 '노트에 빠진 내용을 채워 달라'는 " +
+    "것입니다. 이 요청은 \"노트에 빠졌지만 녹음/자료에는 실제로 있는 내용을 찾아 옮겨줘\"라는 뜻이지, 그 주제에 대해 " +
+    "아는 것을 써 달라는 뜻이 아닙니다.",
+  "당신이 사용할 수 있는 정보원은 오직 아래 네 가지뿐입니다: (1) [강의 녹음 스크립트], (2) 함께 첨부된 강의 슬라이드·" +
+    "교재 페이지 이미지, (3) 학습자가 첨부한 이미지(있는 경우), (4) [기존 강의노트]. 당신이 사전 학습한 외부 전공 지식, " +
+    "교과서 지식, 일반 상식을 끌어와 내용을 보충하거나 상상해서 덧붙이는 것은 엄격히 금지됩니다 — 그 지식이 사실로서 " +
+    "정확하더라도 이 네 자료에 없다면 쓰지 마세요. 교수가 녹음에서 말한 표현·예시·수치와 슬라이드·교재에 실제로 적힌 " +
+    "내용만 근거로 content를 작성하고, 자료에 없는 연결 문장·예시·수치를 만들어 넣지 마세요.",
+  "요청한 내용이 위 자료 어디에도 존재하지 않는다면 절대 지어내지 말고 foundInSources를 false로 응답하세요 " +
+    "(이 경우 anchorText/title/content는 빈 문자열로 두면 됩니다). 자료에 일부만 있다면 foundInSources는 true로 하되, " +
+    "content에는 자료에 실제로 있는 부분만 담고 없는 부분은 채워 넣지 마세요.",
+];
+
+// [심화 탐구 모드] — only when the learner explicitly asked for more depth
+// (lib/expandMode.ts decides; the model doesn't get to).
+const DEEP_DIVE_MODE_RULES = [
+  "[현재 모드: 심화 탐구] 학습자가 명시적으로 '더 자세히/심화해서' 설명해 달라고 요청했습니다. 이 모드에서만 " +
+    "당신의 전공 지식(외부 지식)을 동원해 강의 내용을 확장 해설할 수 있습니다 — 원리, 메커니즘, 배경, 추가 예시 등.",
+  "출발점은 언제나 [강의 녹음 스크립트]·강의 슬라이드·교재·[기존 강의노트]입니다. 교수의 설명과 용어를 먼저 바탕에 두고 " +
+    "그 위에 확장하세요. 외부 지식이 교수의 설명과 다르면 교수의 설명을 부정하지 말고 '일반적인 교재에서는 ~로 설명하기도 " +
+    "합니다'처럼 구분해 덧붙이세요.",
+  `content의 첫 줄은 반드시 다음 문장을 정확히 그대로 쓰세요(학습자가 강의 밖 지식이 섞였음을 알 수 있도록): ${DEEP_DIVE_LABEL} ` +
+    "그 다음 줄은 비워 두고 본문을 시작하세요. 본문에서도 강의에서 나온 내용과 당신이 보충한 내용이 섞여 헷갈리지 않도록, " +
+    "강의 내용을 다시 언급할 때는 '강의에서 설명한 대로'처럼 출처를 밝히세요.",
+  "확실하지 않은 수치·연도·인명·논문은 지어내지 마세요. 확신할 수 있는 일반적인 전공 지식만 쓰세요. foundInSources는 " +
+    "항상 true로 응답하세요.",
+];
 
 // Mirrors app/api/transcribe-and-summarize/route.ts's LATEX_BAN_RULE — this
 // block gets merged into the very same lectureNote and rendered by the same
@@ -138,7 +184,19 @@ export async function POST(request: Request) {
     );
   }
 
-  let body: { lectureNote?: unknown; question?: unknown; imageUrl?: unknown; transcript?: unknown; slideThumbnails?: unknown };
+  // instruction / previousContent / previousMode: a follow-up edit of an
+  // existing draft block (the review modal's "+" button) — the block is
+  // rewritten according to the instruction instead of regenerated blind.
+  let body: {
+    lectureNote?: unknown;
+    question?: unknown;
+    imageUrl?: unknown;
+    transcript?: unknown;
+    slideThumbnails?: unknown;
+    instruction?: unknown;
+    previousContent?: unknown;
+    previousMode?: unknown;
+  };
   try {
     body = await request.json();
   } catch {
@@ -149,6 +207,10 @@ export async function POST(request: Request) {
   const question = typeof body.question === "string" ? body.question.trim() : "";
   const imageUrl = typeof body.imageUrl === "string" ? body.imageUrl.trim() : "";
   const transcript = typeof body.transcript === "string" ? body.transcript.trim() : "";
+  const instruction = typeof body.instruction === "string" ? body.instruction.trim() : "";
+  const previousContent = typeof body.previousContent === "string" ? body.previousContent.trim() : "";
+  const previousMode = isExpandMode(body.previousMode) ? body.previousMode : undefined;
+  const mode: ExpandMode = resolveExpandMode(question, instruction, previousMode);
   const slideThumbnails: IncomingSlideThumbnail[] = Array.isArray(body.slideThumbnails)
     ? body.slideThumbnails
         .filter(
@@ -182,6 +244,15 @@ export async function POST(request: Request) {
       { status: 400 },
     );
   }
+  if (instruction.length > MAX_QUESTION_LENGTH) {
+    return NextResponse.json(
+      { error: `추가 수정 지시는 ${MAX_QUESTION_LENGTH}자 이내로 입력해주세요.` },
+      { status: 400 },
+    );
+  }
+  if (previousContent.length > MAX_PREVIOUS_CONTENT_LENGTH) {
+    return NextResponse.json({ error: "수정할 제안 블록이 너무 깁니다." }, { status: 413 });
+  }
   if (imageUrl && !isAllowedImageUrl(imageUrl, new URL(request.url).origin)) {
     return NextResponse.json({ error: "유효하지 않은 이미지 URL입니다." }, { status: 400 });
   }
@@ -206,18 +277,11 @@ export async function POST(request: Request) {
     "반드시 지정된 JSON 스키마 형식으로만 응답하세요. 설명 문장은 한국어로 쓰되, 전문 용어는 아래 [원본 워딩 최우선 보존] " +
       "규칙을 따르세요 — 녹음 스크립트와 [기존 강의노트]에 쓰인 용어 표기를 그대로 이어서 쓰세요.",
     VERBATIM_TERMINOLOGY_RULE,
-    "먼저 학습자 질문의 의도를 파악하세요 — 예: 누락된 내용 추가, 기존 설명의 오류/부족한 부분 보완·수정, 특정 " +
+    "먼저 학습자 요청의 의도를 파악하세요 — 예: 누락된 내용 추가, 기존 설명의 오류/부족한 부분 보완·수정, 특정 " +
       "양식(표/목록/단계별 정리 등)으로 변환 요청, 심화 개념 확장 요청 등. 그 의도에 정확히 맞는 내용을 작성하세요. " +
-      "무관한 내용을 지어내지 마세요.",
-    "[엄격한 출처 제한(Strict Grounding) — 최우선 규칙] 당신이 사용할 수 있는 정보원은 오직 아래 네 가지뿐입니다: " +
-      "(1) [강의 녹음 스크립트], (2) 함께 첨부된 강의 슬라이드 이미지, (3) 학습자가 첨부한 이미지(있는 경우), " +
-      "(4) [기존 강의노트]. 당신이 사전 학습한 외부 전공 지식, 교과서 지식, 일반 상식을 끌어와 내용을 보충하거나 " +
-      "새로 지어내는 것은 엄격히 금지됩니다 — 그 지식이 사실로서 정확하더라도 이 네 자료에 없다면 쓰지 마세요. " +
-      "\"누락된 내용을 추가해줘\"라는 요청은 \"노트에 빠졌지만 녹음/자료에는 실제로 있는 내용을 찾아 옮겨줘\"라는 " +
-      "뜻입니다. 교수가 녹음에서 말한 표현·예시·수치와 슬라이드에 실제로 적힌 내용만 근거로 content를 작성하세요.",
-    "요청한 내용이 위 자료 어디에도 존재하지 않는다면 절대 지어내지 말고 foundInSources를 false로 응답하세요 " +
-      "(이 경우 anchorText/title/content는 빈 문자열로 두면 됩니다). 자료에 일부만 있다면 foundInSources는 true로 하되, " +
-      "content에는 자료에 실제로 있는 부분만 담고 없는 부분은 채워 넣지 마세요.",
+      "무관한 내용을 지어내지 마세요. 단, 외부 지식을 쓸 수 있는지는 당신이 판단하지 않습니다 — 아래 [현재 모드] 규칙을 " +
+      "그대로 따르세요.",
+    ...(mode === "restore" ? RESTORE_MODE_RULES : DEEP_DIVE_MODE_RULES),
     "anchorText는 아래 제공된 기존 강의노트 원문에 실제로 존재하는 문장이나 제목의 일부를 정확히 그대로(요약하거나 바꿔쓰지 말고) 인용해야 합니다. " +
       "이 블록이 삽입될 위치 바로 앞부분 — 즉 의미상 가장 자연스럽게 이어지는 지점을 고르세요.",
     "content는 절대로 '① 개념 정의 ② 심층 설명 ③ 실생활 예시' 같은 고정 텍스트 템플릿을 따르지 마세요. 대신 아래 " +
@@ -275,6 +339,20 @@ export async function POST(request: Request) {
     "[학습자의 요청]",
     question,
     "",
+    ...(instruction
+      ? [
+          "[수정할 제안 블록 — 이전 답변]",
+          previousContent || "(이전 블록 내용이 전달되지 않았습니다.)",
+          "",
+          "[학습자의 추가 수정 지시]",
+          instruction,
+          "",
+          "이번 작업은 위 [수정할 제안 블록]을 [학습자의 추가 수정 지시]에 맞게 고쳐 쓰는 것입니다. 지시를 반영한 블록 " +
+            "전체의 새 완성본을 content에 작성하세요(이전 블록을 통째로 대체합니다). 지시와 무관한 부분은 이전 블록 그대로 " +
+            "유지하고, 위 [현재 모드] 규칙은 수정한 결과에도 똑같이 적용됩니다.",
+          "",
+        ]
+      : []),
     ...(imagePart
       ? [
           "[학습자가 첨부한 이미지]",
@@ -288,15 +366,22 @@ export async function POST(request: Request) {
       "아래 항목을 작성해주세요.",
     "1. content: 요청 의도에 맞는 완성형 마크다운 블록을 작성하세요. '① 개념 정의 ② 심층 설명 ③ 실생활 예시' 같은 " +
       "고정 템플릿은 절대 사용하지 말고, 위 [기존 강의노트]에서 이미 쓰이고 있는 마크다운 스타일(표/불릿/콜아웃/헤딩 " +
-      "등)을 그대로 따라, 원래 강의노트의 일부였던 것처럼 자연스럽게 작성하세요. 내용은 반드시 [강의 녹음 스크립트]·강의 슬라이드·" +
-      "첨부 이미지·[기존 강의노트]에서만 가져오세요(외부 지식 금지). 시각 자료는 해당 슬라이드를 ![슬라이드 N](slide_N)으로 " +
+      "등)을 그대로 따라, 원래 강의노트의 일부였던 것처럼 자연스럽게 작성하세요. " +
+      (mode === "restore"
+        ? "[누락 내용 복원 모드] 내용은 반드시 [강의 녹음 스크립트]·강의 슬라이드(교재)·첨부 이미지·[기존 강의노트]에서만 " +
+          "가져오세요(외부 지식 금지, 상상해서 덧붙이기 금지). "
+        : `[심화 탐구 모드] 첫 줄은 '${DEEP_DIVE_LABEL}' 그대로 쓰고, 강의 자료를 출발점으로 전공 지식을 동원해 확장 ` +
+          "해설하세요. ") +
+      "시각 자료는 해당 슬라이드를 ![슬라이드 N](slide_N)으로 " +
       "참조하고, 비교표가 필요하면 마크다운 표를 사용하세요. [원본 보존] " +
       "content에는 [기존 강의노트]의 원문 문장을 그대로 옮겨 적지 마세요 — 이 블록은 anchorText 바로 뒤에 " +
       "추가(Append)될 새 내용일 뿐, 원문을 대체하는 용도가 아닙니다.",
     "2. title: 이 블록이 강의노트에 추가/반영하는 내용을 요약하는 짧은 제목을 지어주세요.",
     "3. anchorText: 위 [기존 강의노트] 원문 안에서, 이 내용이 삽입되기 가장 적합한 위치 바로 앞의 문장이나 제목을 원문 그대로 정확히 인용하세요.",
-    "4. foundInSources: 요청한 내용이 [강의 녹음 스크립트]/강의 슬라이드/첨부 이미지/[기존 강의노트] 안에 실제로 있으면 true, " +
-      "어디에도 없으면 false. false인데 외부 지식으로 content를 채우는 것은 금지입니다.",
+    mode === "restore"
+      ? "4. foundInSources: 요청한 내용이 [강의 녹음 스크립트]/강의 슬라이드(교재)/첨부 이미지/[기존 강의노트] 안에 실제로 " +
+        "있으면 true, 어디에도 없으면 false. false인데 외부 지식으로 content를 채우는 것은 금지입니다."
+      : "4. foundInSources: 심화 탐구 모드이므로 true.",
   ].join("\n");
 
   const contentParts: (string | Part)[] = [userPrompt];
@@ -313,6 +398,8 @@ export async function POST(request: Request) {
     hasImage: imagePart !== null,
     transcriptChars: transcript.length,
     slideCount: slideThumbnails.length,
+    mode,
+    isFollowUp: instruction.length > 0,
   });
 
   let responseText: string | undefined;
@@ -323,7 +410,7 @@ export async function POST(request: Request) {
       config: {
         systemInstruction,
         responseMimeType: "application/json",
-        responseSchema: RESPONSE_SCHEMA,
+        responseSchema: buildResponseSchema(mode),
         safetySettings: SAFETY_SETTINGS,
       },
     });
@@ -356,14 +443,24 @@ export async function POST(request: Request) {
 
   // Explicit false only — a missing field (schema drift) shouldn't silently
   // throw away an otherwise-valid block.
-  const content = typeof parsed.content === "string" ? fixEscapedNewlines(parsed.content.trim()) : "";
-  if (parsed.foundInSources === false || !content) {
-    return NextResponse.json({ notFound: true, message: NOT_FOUND_MESSAGE });
+  let content = typeof parsed.content === "string" ? fixEscapedNewlines(parsed.content.trim()) : "";
+  // foundInSources only means something in restore mode — a deep dive is
+  // allowed to go beyond the material.
+  if ((mode === "restore" && parsed.foundInSources === false) || !content) {
+    return NextResponse.json({ notFound: true, mode, message: NOT_FOUND_MESSAGE });
+  }
+  // The outside-knowledge label is guaranteed here rather than trusted to
+  // the model.
+  if (mode === "deepDive" && !content.startsWith(DEEP_DIVE_LABEL)) {
+    content = `${DEEP_DIVE_LABEL}
+
+${content}`;
   }
 
   return NextResponse.json({
     anchorText: typeof parsed.anchorText === "string" ? fixEscapedNewlines(parsed.anchorText.trim()) : "",
     title: typeof parsed.title === "string" ? fixEscapedNewlines(parsed.title.trim()) : question,
     content,
+    mode,
   });
 }

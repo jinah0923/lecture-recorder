@@ -1,3 +1,5 @@
+import type { ExpandMode } from "@/lib/expandMode";
+
 // In-memory only — never persisted to IndexedDB. Represents audio that is
 // either freshly captured (recording/upload) or re-attached by the user from
 // their device for the current viewing session.
@@ -151,4 +153,6 @@ export type DraftBlock = {
   // a fixed 개념/설명/예시 structure. See app/api/expand-note/route.ts.
   content: string;
   status: "pending" | "confirmed";
+  // Absent on blocks from before the mode split (treated as a plain deep dive).
+  mode?: ExpandMode;
 };

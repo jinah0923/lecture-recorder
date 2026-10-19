@@ -10,6 +10,7 @@ import { TranscriptPanel } from "@/components/TranscriptPanel";
 import { buildDeepDiveImageProxyUrl, uploadFileToBlob } from "@/lib/blobUpload";
 import { markdownToClipboardHtml } from "@/lib/clipboardHtml";
 import { copyRichToClipboard, downloadTextFile } from "@/lib/export";
+import { EXPAND_MODE_LABELS, detectExpandMode } from "@/lib/expandMode";
 import { describeBlockedChunks } from "@/lib/geminiMessages";
 import { stripMarkTags } from "@/lib/inlineMarkdown";
 import { toNotionPasteMarkdown } from "@/lib/noteBlocks";
@@ -90,12 +91,18 @@ async function buildGroundingSlides(slideImages: Map<number, string> | undefined
   return kept;
 }
 
+// The header names the mode, so a restored passage (from the recording and
+// material only) and a deep dive (outside knowledge allowed) stay
+// distinguishable in the saved note.
+const DRAFT_BLOCK_HEADER_LABELS = { restore: "누락 내용 복원", deepDive: "AI 심화 탐구" } as const;
+
 function buildDraftBlockMarkdown(block: DraftBlock): string {
   // Blank line after the header ends the 💜 callout box (see the group-
   // consuming loop in lib/markdown.tsx) so block.content renders below it as
   // fully-parsed markdown — images/tables/headings included — rather than
   // being swallowed as plain text inside the callout.
-  return [`💜 **[AI 심화 탐구] ${block.title}**`, "", block.content].join("\n");
+  const label = DRAFT_BLOCK_HEADER_LABELS[block.mode ?? "deepDive"];
+  return [`💜 **[${label}] ${block.title}**`, "", block.content].join("\n");
 }
 
 function mergeConfirmedBlocks(lectureNote: string, blocks: DraftBlock[]): string {
@@ -256,10 +263,22 @@ export function ReviewPanel({
     downloadTextFile(`lecture-note.${extension}`, extension === "txt" ? stripMarkTags(content) : content, mime);
   }
 
-  async function requestExpansion(question: string, replaceBlockId?: string, imageFile?: File) {
-    if (!question.trim()) return;
+  // refine: a follow-up instruction on an existing draft block (the review
+  // modal's "+" button) — the server rewrites that block. Returns null on
+  // success or the message to show; a refine's message is shown on the block
+  // itself by the modal, a new request's in the panel.
+  async function requestExpansion(
+    question: string,
+    options: { imageFile?: File; refine?: { block: DraftBlock; instruction: string } } = {},
+  ): Promise<string | null> {
+    const { imageFile, refine } = options;
+    if (!question.trim()) return null;
     setIsExpanding(true);
-    setExpandError(null);
+    if (!refine) setExpandError(null);
+    const fail = (message: string) => {
+      if (!refine) setExpandError(message);
+      return message;
+    };
     try {
       let imageUrl: string | undefined;
       if (imageFile) {
@@ -285,6 +304,13 @@ export function ReviewPanel({
           transcript: buildTranscriptText(aiResult.transcript),
           slideThumbnails: await buildGroundingSlides(slideImages),
           ...(imageUrl ? { imageUrl } : {}),
+          ...(refine
+            ? {
+                instruction: refine.instruction,
+                previousContent: refine.block.content,
+                ...(refine.block.mode ? { previousMode: refine.block.mode } : {}),
+              }
+            : {}),
         }),
       });
       const data = await response.json();
@@ -294,25 +320,25 @@ export function ReviewPanel({
       // Nothing in the recording/slides backs this request — show the
       // server's message instead of creating (or replacing) a draft block.
       if (data?.notFound) {
-        setExpandError(typeof data.message === "string" ? data.message : "제공된 강의 자료와 녹음본에서는 해당 내용을 찾을 수 없습니다.");
-        return;
+        return fail(typeof data.message === "string" ? data.message : "제공된 강의 자료와 녹음본에서는 해당 내용을 찾을 수 없습니다.");
       }
       const newBlock: DraftBlock = {
-        id: replaceBlockId ?? crypto.randomUUID(),
+        id: refine?.block.id ?? crypto.randomUUID(),
         sourceQuestion: question,
-        anchorText: typeof data.anchorText === "string" ? data.anchorText : "",
+        anchorText:
+          typeof data.anchorText === "string" && data.anchorText ? data.anchorText : (refine?.block.anchorText ?? ""),
         title: typeof data.title === "string" ? data.title : question,
         content: typeof data.content === "string" ? data.content : "",
         status: "pending",
+        ...(data.mode === "restore" || data.mode === "deepDive" ? { mode: data.mode } : {}),
       };
       setDraftBlocks((prev) =>
-        replaceBlockId
-          ? prev.map((block) => (block.id === replaceBlockId ? newBlock : block))
-          : [...prev, newBlock],
+        refine ? prev.map((block) => (block.id === refine.block.id ? newBlock : block)) : [...prev, newBlock],
       );
       setShowModal(true);
+      return null;
     } catch (error) {
-      setExpandError(error instanceof Error ? error.message : "심화 탐구 중 오류가 발생했습니다.");
+      return fail(error instanceof Error ? error.message : "심화 탐구 중 오류가 발생했습니다.");
     } finally {
       setIsExpanding(false);
     }
@@ -322,7 +348,7 @@ export function ReviewPanel({
     const question = expandQuestion.trim();
     if (!question) return;
     const imageFile = expandImage?.file;
-    void requestExpansion(question, undefined, imageFile);
+    void requestExpansion(question, { imageFile });
     setExpandQuestion("");
     setExpandImage(null);
   }
@@ -362,11 +388,10 @@ export function ReviewPanel({
     setDraftBlocks((prev) => prev.filter((block) => block.id !== id));
   }
 
-  function handleRefineBlock(id: string, feedback: string) {
+  async function handleRefineBlock(id: string, instruction: string): Promise<string | null> {
     const block = draftBlocks.find((b) => b.id === id);
-    if (!block) return;
-    const combinedQuestion = `${block.sourceQuestion}\n\n[추가 요청] ${feedback}`;
-    void requestExpansion(combinedQuestion, id);
+    if (!block) return "수정할 블록을 찾을 수 없습니다.";
+    return requestExpansion(block.sourceQuestion, { refine: { block, instruction } });
   }
 
   function handleSaveDraftBlocks() {
@@ -594,7 +619,7 @@ export function ReviewPanel({
                 if (event.key === "Enter") handleRequestExpansion();
               }}
               onPaste={handleQuestionPaste}
-              placeholder="[누락 내용 추가 / 심화 개념 / 구조식 요청] 예: 전사 과정 중 스플라이싱 내용이 빠졌어, 표 형태로 정리해서 추가해 줘."
+              placeholder="예: 스플라이싱 내용이 빠졌어 (자료 기반 복원) / 스플라이싱을 더 자세히 알려줘 (심화 탐구)"
               disabled={!aiResult.lectureNote || isEditingNote}
               className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-900 outline-none focus:border-indigo-300 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
             />
@@ -610,8 +635,13 @@ export function ReviewPanel({
           <p className="mt-1.5 text-[11px] text-zinc-400 dark:text-zinc-500">
             {isEditingNote
               ? "✏️ 노트를 직접 수정하는 중에는 사용할 수 없어요 — 저장하거나 취소한 뒤 이용해주세요."
-              : "💡 강의 내용 중 보강하고 싶은 학술 개념, 심층 원리, 실생활 예시를 입력하거나 사진(구조식/도표)을 첨부하면 강의노트의 적절한 위치에 제안 블록을 생성합니다. 이미지는 붙여넣기(Ctrl+V)로도 첨부할 수 있습니다."}
+              : "💡 \"A 내용이 빠졌어\"처럼 요청하면 녹음 스크립트와 첨부 교재에 실제로 있는 내용만 찾아 복원하고, \"A를 더 자세히/심화해서 알려줘\"처럼 명시적으로 요청할 때만 강의 밖 전공 지식까지 동원해 해설합니다. 사진(구조식/도표)은 붙여넣기(Ctrl+V)로도 첨부할 수 있습니다."}
           </p>
+          {expandQuestion.trim() && !isEditingNote && (
+            <p className="mt-1 text-[11px] font-medium text-indigo-600 dark:text-indigo-400">
+              요청 모드: {EXPAND_MODE_LABELS[detectExpandMode(expandQuestion) ?? "restore"]}
+            </p>
+          )}
           {expandError && <p className="mt-1.5 text-xs text-red-600 dark:text-red-400">{expandError}</p>}
           {draftBlocks.length > 0 && !showModal && (
             <button
