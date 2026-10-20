@@ -20,6 +20,8 @@ export const CHARS_PER_PAGE = 800;
 const MAX_SECTION_CHARS = CHARS_PER_PAGE * 2;
 // Below this, a split-off piece is merged into the next one.
 const MIN_PIECE_CHARS = 200;
+// Below this, a page takes the next section even past CHARS_PER_PAGE.
+const MIN_PAGE_CHARS = 300;
 
 const MAJOR_HEADING = /^#{1,2}\s+/;
 const SUB_HEADING = /^#{3,6}\s+/;
@@ -119,7 +121,9 @@ export function splitIntoSections(markdown: string): string[] {
 
 // Accumulates whole sections onto a page until the next one would push the
 // page past CHARS_PER_PAGE (counting spaces), then starts a new page — a
-// section is never split mid-way, so context stays intact.
+// section is never split mid-way, so context stays intact. A page still
+// holding less than MIN_PAGE_CHARS takes the next section anyway, so a short
+// section (a "## 1부" with a few lines) never ends up as a near-empty page.
 export function paginate(markdown: string): string[] {
   const sections = splitIntoSections(markdown);
   if (sections.length === 0) return [""];
@@ -129,7 +133,11 @@ export function paginate(markdown: string): string[] {
   let currentLength = 0;
 
   for (const section of sections) {
-    if (currentSections.length > 0 && currentLength + section.length > CHARS_PER_PAGE) {
+    if (
+      currentSections.length > 0 &&
+      currentLength >= MIN_PAGE_CHARS &&
+      currentLength + section.length > CHARS_PER_PAGE
+    ) {
       pages.push(currentSections.join("\n\n"));
       currentSections = [];
       currentLength = 0;

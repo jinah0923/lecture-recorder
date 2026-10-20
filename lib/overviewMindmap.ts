@@ -34,7 +34,7 @@ function nodeLabel(heading: string): string {
   const label = heading
     .replace(/<\/?mark>/g, "")
     .replace(/\*\*|__|`|\$/g, "")
-    .replace(/^\s*(\d+부:?|\d+(\.\d+)*\.?)\s*/, "")
+    .replace(/^\s*(\d+부(-\d+)*(\.\d+)*[.:]?|\d+(\.\d+)*\.?)\s*/, "")
     .replace(/[()[\]{}<>"':;#|]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
