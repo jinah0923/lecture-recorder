@@ -109,3 +109,14 @@ body {
   animation: wave 0.9s ease-in-out infinite;
   transform-origin: center;
 }
+
+/* Inline formulas in the note (MathFormula in lib/markdown.tsx). KaTeX draws
+   math at 1.21em by default — noticeably bigger than the 14px note text, so
+   B₁, NAD⁺ looked like they jumped out of the line, and tall ones (fractions,
+   stacked scripts) pushed their line apart from the next. Near text size,
+   on the text's own baseline (not "middle", which would lift the formula's
+   baseline off the text's). Display formulas keep KaTeX's own size. */
+.note-math-inline > .katex {
+  font-size: 1.05em;
+  vertical-align: baseline;
+}

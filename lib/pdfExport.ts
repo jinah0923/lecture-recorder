@@ -1,7 +1,14 @@
 "use client";
 
 import { tokenizeInline } from "@/lib/inlineMarkdown";
-import { displayMathFenceClose, matchDisplayMathLine, normalizeTex, protectMath, splitMathPlaceholders } from "@/lib/inlineMath";
+import {
+  displayMathFenceClose,
+  glueMathToNeighbors,
+  matchDisplayMathLine,
+  normalizeTex,
+  protectMath,
+  splitMathPlaceholders,
+} from "@/lib/inlineMath";
 import { renderKatexHtml } from "@/lib/katexRender";
 import type { MathSpan } from "@/lib/inlineMath";
 import {
@@ -104,10 +111,13 @@ function mathHtml(span: MathSpan): string {
 
 // Text that may contain formula placeholders (protectMath) -> HTML, with
 // `plain` applied to the ordinary text between formulas.
+// A formula and the characters touching it ("(B₁₂)") wrap as one unit, as on
+// screen (glueMathToNeighbors).
 function textWithMathHtml(text: string, spans: MathSpan[], plain: (value: string) => string): string {
   if (spans.length === 0) return plain(text);
-  return splitMathPlaceholders(text)
-    .map((piece) => (typeof piece === "number" ? mathHtml(spans[piece]) : plain(piece)))
+  const pieceHtml = (piece: string | number) => (typeof piece === "number" ? mathHtml(spans[piece]) : plain(piece));
+  return glueMathToNeighbors(splitMathPlaceholders(text))
+    .map((item) => (Array.isArray(item) ? `<span style="white-space:nowrap;">${item.map(pieceHtml).join("")}</span>` : pieceHtml(item)))
     .join("");
 }
 

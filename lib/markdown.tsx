@@ -3,7 +3,14 @@ import { MarkdownImage } from "@/components/MarkdownImage";
 import { MermaidDiagram } from "@/components/MermaidDiagram";
 import { SlideImage } from "@/components/SlideImage";
 import { stripMarkTags, tokenizeInline } from "@/lib/inlineMarkdown";
-import { displayMathFenceClose, matchDisplayMathLine, normalizeTex, protectMath, splitMathPlaceholders } from "@/lib/inlineMath";
+import {
+  displayMathFenceClose,
+  glueMathToNeighbors,
+  matchDisplayMathLine,
+  normalizeTex,
+  protectMath,
+  splitMathPlaceholders,
+} from "@/lib/inlineMath";
 import { renderKatexHtml } from "@/lib/katexRender";
 import type { MathSpan } from "@/lib/inlineMath";
 import {
@@ -112,21 +119,28 @@ function MathFormula({ tex, display }: MathSpan) {
   // KaTeX escapes everything it outputs and \href/\url stay disabled (trust
   // is off by default), so its HTML is safe to inject.
   const __html = renderMathHtml(tex, display);
+  // note-math-inline: sized and aligned to the surrounding text (globals.css).
   return display ? (
     <span className="block overflow-x-auto overflow-y-hidden" dangerouslySetInnerHTML={{ __html }} />
   ) : (
-    <span dangerouslySetInnerHTML={{ __html }} />
+    <span className="note-math-inline" dangerouslySetInnerHTML={{ __html }} />
   );
 }
 
 // A text run with formula placeholders (see protectMath) put back as KaTeX.
+// A formula and the characters touching it ("(B₁₂)") wrap as one unit —
+// see glueMathToNeighbors.
 function renderTextWithMath(text: string, spans: MathSpan[]): ReactNode {
   if (spans.length === 0) return text;
-  return splitMathPlaceholders(text).map((piece, index) =>
-    typeof piece === "number" ? (
-      <MathFormula key={index} {...spans[piece]} />
+  const renderPiece = (piece: string | number, key: number) =>
+    typeof piece === "number" ? <MathFormula key={key} {...spans[piece]} /> : <Fragment key={key}>{piece}</Fragment>;
+  return glueMathToNeighbors(splitMathPlaceholders(text)).map((item, index) =>
+    Array.isArray(item) ? (
+      <span key={index} className="whitespace-nowrap">
+        {item.map(renderPiece)}
+      </span>
     ) : (
-      <Fragment key={index}>{piece}</Fragment>
+      renderPiece(item, index)
     ),
   );
 }
