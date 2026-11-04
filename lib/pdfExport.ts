@@ -894,9 +894,16 @@ async function replaceFormulasWithImages(frameDoc: Document, root: HTMLElement, 
     replacement.alt = formula.textContent ?? "";
     // Inline: the image's own baseline (baselineFromTop) sits on the text
     // baseline. Display: centered by .katex-display's text-align.
+    // The transparent padding (pad on every side, so antialiased edges aren't
+    // clipped) is cancelled by negative margins on all four sides — top and
+    // bottom too, or it counts toward the line's height: a line holding a
+    // formula grew ~2px, and in a table its baseline then sat lower than the
+    // formula-free cells beside it. vertical-align positions the bottom
+    // margin edge, which -pad lifts pad above the image's bottom, so it's
+    // raised by pad to keep the glyphs exactly where they were.
     replacement.style.cssText = isDisplay
       ? `display:inline-block;width:${width}px;height:${height}px;vertical-align:middle;`
-      : `display:inline-block;width:${width}px;height:${height}px;vertical-align:${(baselineFromTop - height - html2canvasTextDrop(frameDoc, parent, formula)).toFixed(2)}px;margin:0 -${pad}px;`;
+      : `display:inline-block;width:${width}px;height:${height}px;vertical-align:${(baselineFromTop - height - html2canvasTextDrop(frameDoc, parent, formula) + pad).toFixed(2)}px;margin:-${pad}px;`;
     formula.replaceWith(replacement);
   }
   return true;
