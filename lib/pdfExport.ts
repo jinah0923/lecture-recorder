@@ -947,6 +947,28 @@ async function renderMermaidDiagrams(root: HTMLElement, scale: number): Promise<
   }
 }
 
+// Before measuring page-break positions and capturing: every font the
+// capture uses has finished loading (system Korean fonts included, not only
+// KaTeX's) and the browser has laid the page out with them — a capture taken
+// mid-swap measures one font and draws another. Two animation frames let
+// the final layout and line wrapping settle — capped by a short timer,
+// because a hidden or off-screen frame (the capture frames are both) may
+// not get animation frames at all, and the export must never hang on one.
+const SETTLE_MAX_WAIT_MS = 150;
+async function settleLayout(docs: Document[], waitForFrames = true): Promise<void> {
+  await Promise.all(docs.map((doc) => doc.fonts.ready.catch(() => undefined)));
+  if (!waitForFrames) return;
+  await new Promise<void>((resolve) => {
+    const timer = window.setTimeout(resolve, SETTLE_MAX_WAIT_MS);
+    window.requestAnimationFrame(() =>
+      window.requestAnimationFrame(() => {
+        window.clearTimeout(timer);
+        resolve();
+      }),
+    );
+  });
+}
+
 async function loadKatexFonts(docs: Document[]): Promise<void> {
   await Promise.all(
     docs.flatMap((doc) =>
@@ -1100,6 +1122,7 @@ export async function exportSectionsToPdf(sections: PdfSectionId[], data: PdfExp
       ),
     );
 
+    await settleLayout([frameDoc, document]);
     const avoidRanges = measureAvoidRanges(printRoot, CAPTURE_SCALE);
 
     // Captured directly from the still-isolated iframe element — never
@@ -1112,7 +1135,7 @@ export async function exportSectionsToPdf(sections: PdfSectionId[], data: PdfExp
       // fonts must be loaded there too before measuring, or formulas are
       // laid out with fallback-font metrics (fraction bars through the
       // numerator, subscripts on the baseline) while drawn in KaTeX fonts.
-      onclone: hasMath ? (clonedDoc) => loadKatexFonts([clonedDoc]) : undefined,
+      onclone: (clonedDoc) => (hasMath ? loadKatexFonts([clonedDoc]) : settleLayout([clonedDoc], false)),
     });
 
     const mmPerCanvasPx = USABLE_WIDTH_MM / canvas.width;

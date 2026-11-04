@@ -120,3 +120,17 @@ body {
   font-size: 1.05em;
   vertical-align: baseline;
 }
+
+/* PDF export (lib/pdfExport.ts): html2canvas finds each font's baseline by
+   measuring where this 1×1 probe image sits next to a line of sample text —
+   in the APP's document, where Tailwind's base reset makes every img
+   display:block. As a block the probe drops to the next line, the measured
+   baseline came out ~6px too deep, and every PDF text run was drawn that
+   much below its layout box: highlight bands looked lifted above their
+   words and callout text sank to the bottom of its box. The probe (and only
+   the probe — no real image uses this data URL) goes back to inline. The
+   formula-image placement in pdfExport.ts repeats the same measurement with
+   the same image, so it stays in step. */
+img[src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"] {
+  display: inline !important;
+}
