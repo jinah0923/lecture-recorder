@@ -11,6 +11,7 @@ import { buildDeepDiveImageProxyUrl, uploadFileToBlob } from "@/lib/blobUpload";
 import { markdownToClipboardHtml } from "@/lib/clipboardHtml";
 import { copyRichToClipboard, downloadTextFile } from "@/lib/export";
 import { EXPAND_MODE_LABELS, detectExpandMode } from "@/lib/expandMode";
+import { friendlyHttpMessage, toFriendlyErrorMessage } from "@/lib/friendlyErrors";
 import { describeBlockedChunks } from "@/lib/geminiMessages";
 import { stripMarkTags } from "@/lib/inlineMarkdown";
 import { toNotionPasteMarkdown } from "@/lib/noteBlocks";
@@ -309,10 +310,17 @@ export function ReviewPanel({
             : {}),
         }),
       });
-      const data = await response.json();
+      // A failure before the route runs (Vercel's own 413 for an oversized
+      // request) has no JSON body — its status says what happened instead.
+      const data = await response.json().catch(() => null);
       if (!response.ok) {
-        throw new Error(data?.error ?? "심화 탐구에 실패했습니다.");
+        throw new Error(
+          typeof data?.error === "string"
+            ? data.error
+            : (friendlyHttpMessage(response.status) ?? `심화 탐구에 실패했습니다. (오류 코드 ${response.status})`),
+        );
       }
+      if (!data) throw new Error("심화 탐구 응답을 읽지 못했습니다. 다시 시도해 주세요.");
       // Nothing in the recording/slides backs this request — show the
       // server's message instead of creating (or replacing) a draft block.
       if (data?.notFound) {
@@ -334,7 +342,7 @@ export function ReviewPanel({
       setShowModal(true);
       return null;
     } catch (error) {
-      return fail(error instanceof Error ? error.message : "심화 탐구 중 오류가 발생했습니다.");
+      return fail(toFriendlyErrorMessage(error instanceof Error ? error.message : "심화 탐구 중 오류가 발생했습니다."));
     } finally {
       setIsExpanding(false);
     }

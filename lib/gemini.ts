@@ -3,6 +3,7 @@
 
 import { ApiError, BlockedReason, FinishReason, HarmBlockThreshold, HarmCategory } from "@google/genai";
 import type { GenerateContentResponse, SafetySetting } from "@google/genai";
+import { friendlyHttpMessage } from "@/lib/friendlyErrors";
 import { PROHIBITED_CONTENT_MESSAGE } from "@/lib/geminiMessages";
 
 // Lecture transcripts routinely trip the default filters on purely academic
@@ -51,7 +52,7 @@ export class PolicyBlockedError extends Error {
 // ({"error":{"code":429,"message":"...","status":"RESOURCE_EXHAUSTED"}}) —
 // pull out Gemini's own status + message so the user sees the real cause
 // instead of a raw JSON blob or a guess.
-function parseApiError(error: ApiError): { status: string; message: string } {
+function parseApiError(error: { message: string }): { status: string; message: string } {
   try {
     const body = JSON.parse(error.message) as { error?: { status?: unknown; message?: unknown } };
     return {
@@ -63,8 +64,22 @@ function parseApiError(error: ApiError): { status: string; message: string } {
   }
 }
 
-export function describeGeminiError(error: unknown, model: string): string {
-  if (error instanceof ApiError) {
+// Also by shape, not only instanceof: a second copy of @google/genai in a
+// bundle makes instanceof fail, and the user would get the raw JSON body.
+function asApiError(error: unknown): { status: number; message: string } | null {
+  if (error instanceof ApiError) return error;
+  const candidate = error as { name?: unknown; status?: unknown; message?: unknown } | null;
+  return candidate &&
+    candidate.name === "ApiError" &&
+    typeof candidate.status === "number" &&
+    typeof candidate.message === "string"
+    ? { status: candidate.status, message: candidate.message }
+    : null;
+}
+
+export function describeGeminiError(rawError: unknown, model: string): string {
+  const error = asApiError(rawError);
+  if (error) {
     const { status, message } = parseApiError(error);
     const code = `HTTP ${error.status}${status ? ` ${status}` : ""}`;
     if (error.status === 404) {
@@ -73,11 +88,14 @@ export function describeGeminiError(error: unknown, model: string): string {
     if (error.status === 401 || error.status === 403) {
       return `Gemini API 인증에 실패했습니다. GEMINI_API_KEY를 확인해주세요. (${code}: ${message})`;
     }
-    if (error.status === 429) {
-      // Covers both a per-minute rate limit and a spent daily/billing quota —
-      // Gemini's own message says which, so it's shown verbatim rather than
-      // guessing "크레딧 소진" for a limit that clears in a minute.
-      return `Gemini API 사용 한도를 초과했습니다 (${code}). 잠시 후 다시 시도하거나 AI Studio에서 할당량·결제 상태를 확인해주세요. Gemini 응답: ${message}`;
+    // 402 (credits spent), 413, 429 (rate limit vs. spent quota, told apart
+    // from Gemini's own text), 502/503/504: plain-language messages instead
+    // of the raw API body (lib/friendlyErrors.ts). The body still goes to
+    // the server log.
+    const friendly = friendlyHttpMessage(error.status, `${status} ${message}`);
+    if (friendly) {
+      console.error("[gemini] API error", { status: error.status, apiStatus: status, message });
+      return `[Gemini] ${friendly}`;
     }
     if (error.status >= 500) {
       return `Gemini 서버 오류로 요청이 실패했습니다. 잠시 후 다시 시도해주세요. (${code}: ${message})`;
@@ -86,7 +104,7 @@ export function describeGeminiError(error: unknown, model: string): string {
   }
   // Our own thrown errors (readResponseText below, upload/processing steps)
   // already carry a specific Korean message — pass them through unchanged.
-  if (error instanceof Error) return error.message;
+  if (rawError instanceof Error) return rawError.message;
   return "알 수 없는 오류로 Gemini 요청이 실패했습니다.";
 }
 

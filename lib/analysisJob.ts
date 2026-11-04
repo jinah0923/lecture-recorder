@@ -1,5 +1,6 @@
 "use client";
 
+import { friendlyHttpMessage, toFriendlyErrorMessage } from "@/lib/friendlyErrors";
 import type {
   AnalysisEngine,
   BlockedChunkNotice,
@@ -148,9 +149,13 @@ export function clearStoredJobId(sessionId: string): void {
   window.localStorage.removeItem(ACTIVE_JOB_KEY_PREFIX + sessionId);
 }
 
+// Our routes answer with { error }; a failure before the route runs (Vercel's
+// own 413 for an oversized body, a 502 from the platform) has no such body,
+// so its status says what happened instead (lib/friendlyErrors.ts).
 async function readErrorMessage(response: Response, fallback: string): Promise<string> {
   const body = await response.json().catch(() => null);
-  return (body && typeof body.error === "string" && body.error) || fallback;
+  if (body && typeof body.error === "string" && body.error) return toFriendlyErrorMessage(body.error);
+  return friendlyHttpMessage(response.status) ?? `${fallback} (오류 코드 ${response.status})`;
 }
 
 // Kicks off analysis and returns immediately with just a job id — the
@@ -298,7 +303,7 @@ export async function pollJobUntilDone(
     const status = await fetchJobStatus(jobId);
     onTick?.(status);
     if (status.status === "completed") return status.result;
-    if (status.status === "error") throw new Error(status.error);
+    if (status.status === "error") throw new Error(toFriendlyErrorMessage(status.error));
     if (Date.now() - status.createdAt > MAX_POLL_MS) throw new Error(POLL_TIMEOUT_MESSAGE);
     await delayOrWake(POLL_INTERVAL_MS);
   }

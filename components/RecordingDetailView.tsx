@@ -42,6 +42,7 @@ import { formatDateTime, formatFileSize } from "@/lib/format";
 import type { UploadedBlobRef } from "@/lib/blobUpload";
 import { uploadFileToBlob } from "@/lib/blobUpload";
 import { buildSlideThumbnails, extractPdfSlides, extractPdfText } from "@/lib/pdfSlides";
+import { toFriendlyErrorMessage } from "@/lib/friendlyErrors";
 import { pushLocalSessions } from "@/lib/sync";
 import { extractChangedTerms, replaceAllOccurrences } from "@/lib/termDiff";
 import { replaceAllInMarkdown, replaceAllInText } from "@/lib/transcriptReplace";
@@ -524,7 +525,7 @@ export function RecordingDetailView({
         await pushLocalSessions().catch(() => {});
       } catch (error) {
         clearStoredJobId(sessionId);
-        const message = error instanceof Error ? error.message : "분석 중 알 수 없는 오류가 발생했습니다.";
+        const message = toFriendlyErrorMessage(error instanceof Error ? error.message : "분석 중 알 수 없는 오류가 발생했습니다.");
         setAnalyzeError(message);
         // Covers both ways this can fail: pollJobUntilDone's own MAX_POLL_MS
         // timeout (message is POLL_TIMEOUT_MESSAGE) and the server writing an
@@ -827,7 +828,7 @@ export function RecordingDetailView({
       } catch (error) {
         clearStoredMergeJob(sessionId);
         const failureLabel = fileNames.length > 0 ? "자료 병합 분석" : "스크립트 재분석";
-        const message = error instanceof Error ? error.message : `${failureLabel}에 실패했습니다.`;
+        const message = toFriendlyErrorMessage(error instanceof Error ? error.message : `${failureLabel}에 실패했습니다.`);
         const blocked = parseProhibitedContentError(message);
         if (blocked) {
           setPolicyBlock(blocked);
@@ -903,7 +904,8 @@ export function RecordingDetailView({
       console.error("자료 병합 분석 시작 실패:", error);
       setMergeProgress(null);
       const failureLabel = scriptOnly ? "스크립트 재분석" : "자료 병합 분석";
-      const message = error instanceof Error ? error.message : `${failureLabel}을 시작하지 못했습니다.`;
+      // Blob upload / request failures arrive raw (e.g. a Vercel 402 or 413).
+      const message = toFriendlyErrorMessage(error instanceof Error ? error.message : `${failureLabel}을 시작하지 못했습니다.`);
       setPollFailureToast(`${failureLabel} 실패: ${message}`);
       if (pollFailureToastTimerRef.current) window.clearTimeout(pollFailureToastTimerRef.current);
       pollFailureToastTimerRef.current = window.setTimeout(() => setPollFailureToast(null), 10000);

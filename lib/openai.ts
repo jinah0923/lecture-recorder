@@ -4,6 +4,7 @@
 
 import { ANALYSIS_FIELD_DESCRIPTIONS } from "@/lib/analysisPrompt";
 import type { CheckpointSegment, RawAnalysisResponse } from "@/lib/analysisPipeline";
+import { friendlyHttpMessage } from "@/lib/friendlyErrors";
 import { buildContinuationPrompt, completeTruncatedNote } from "@/lib/noteCompletion";
 
 const OPENAI_API_BASE_URL = "https://api.openai.com/v1";
@@ -50,8 +51,12 @@ async function describeOpenAiFailure(response: Response, what: string): Promise<
   const message = typeof body?.error?.message === "string" ? body.error.message : "";
   const code = `HTTP ${response.status}${typeof body?.error?.code === "string" ? ` ${body.error.code}` : ""}`;
   if (response.status === 401) return `OpenAI API 인증에 실패했습니다. OPENAI_API_KEY를 확인해주세요. (${code}: ${message})`;
-  if (response.status === 429) {
-    return `OpenAI API 사용 한도를 초과했습니다 (${code}). 잠시 후 다시 시도하거나 OpenAI 결제·한도 설정을 확인해주세요. OpenAI 응답: ${message}`;
+  // 402 / 413 / 429 (insufficient_quota = credits spent vs. a rate limit) /
+  // 502-504 in plain words (lib/friendlyErrors.ts); the raw body goes to the log.
+  const friendly = friendlyHttpMessage(response.status, `${code} ${message}`);
+  if (friendly) {
+    console.error("[openai] API error", { what, status: response.status, code, message });
+    return `[OpenAI] ${friendly}`;
   }
   if (response.status === 404) return `OpenAI 모델을 찾을 수 없습니다 (${code}). OPENAI_ANALYSIS_MODEL 설정을 확인해주세요. ${message}`;
   if (response.status >= 500) return `OpenAI 서버 오류로 ${what}에 실패했습니다. 잠시 후 다시 시도해주세요. (${code}: ${message})`;
