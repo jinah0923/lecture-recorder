@@ -34,6 +34,8 @@ type ReviewPanelProps = {
    * analysis job. */
   onSaveLectureNoteNow: (nextLectureNote: string) => Promise<void>;
   onUpdateTranscript: (nextTranscript: TranscriptSegment[]) => void;
+  /** The script's "모두 바꾸기": persists immediately (device + cloud); true when the cloud push succeeded. */
+  onSaveTranscriptNow?: (nextTranscript: TranscriptSegment[]) => Promise<boolean>;
   onSegmentCommitted?: (oldText: string, newText: string) => void;
   /** "📄 자료 추가해서 다시 분석": opens the caller's modal (pick material, or re-analyze the script alone). */
   onMergeMaterial?: () => void;
@@ -144,6 +146,7 @@ export function ReviewPanel({
   onUpdateLectureNote,
   onSaveLectureNoteNow,
   onUpdateTranscript,
+  onSaveTranscriptNow,
   onSegmentCommitted,
   onMergeMaterial,
   mergeProgress = null,
@@ -639,6 +642,7 @@ export function ReviewPanel({
         transcript={aiResult.transcript}
         onSeek={onSeek}
         onTranscriptChange={onUpdateTranscript}
+        onReplaceAll={onSaveTranscriptNow}
         onSegmentCommitted={onSegmentCommitted}
       />
 

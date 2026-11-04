@@ -970,6 +970,37 @@ export function RecordingDetailView({
     setAiResult((current) => (current ? { ...current, transcript: nextTranscript } : current));
   }, []);
 
+  // The script's "모두 바꾸기" (and its undo): one change across the whole
+  // transcript, so it's written to IndexedDB and pushed to the cloud copy
+  // right away rather than left to the debounced autosave — same shape as
+  // saveLectureNoteNow below. Resolves true when the cloud push went through
+  // (false: signed out or offline — the change is still saved on this device
+  // and goes up with the next successful sync).
+  const saveTranscriptNow = useCallback(
+    async (nextTranscript: TranscriptSegment[]): Promise<boolean> => {
+      let nextAiResult: AiResult | null = null;
+      setAiResult((current) => {
+        if (!current) return current;
+        nextAiResult = {
+          ...current,
+          transcript: nextTranscript,
+          fullText: nextTranscript.map((segment) => segment.text).join(" ").trim(),
+        };
+        return nextAiResult;
+      });
+      if (!nextAiResult) return false;
+      await saveSession(buildSessionSnapshot({ aiResult: nextAiResult }));
+      onSessionSaved();
+      try {
+        await pushLocalSessions();
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [buildSessionSnapshot, onSessionSaved],
+  );
+
   // Global term sync: when a transcript-segment edit turns out to be a real
   // word/term correction (not just whitespace/punctuation), propagate the
   // same find-and-replace to summary/lectureNote/checklist so a name fixed
@@ -1110,6 +1141,7 @@ export function RecordingDetailView({
           onUpdateLectureNote={updateLectureNote}
           onSaveLectureNoteNow={saveLectureNoteNow}
           onUpdateTranscript={updateTranscript}
+          onSaveTranscriptNow={saveTranscriptNow}
           onSegmentCommitted={handleSegmentCommitted}
           slideImages={slideImagesMap}
           onMergeMaterial={handleMergeMaterial}

@@ -3,12 +3,17 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { Pagination } from "@/components/Pagination";
 import { formatDuration } from "@/lib/format";
+import { countTranscriptMatches, replaceAllInTranscript } from "@/lib/transcriptReplace";
 import type { TranscriptSegment } from "@/lib/types";
 
 type TranscriptPanelProps = {
   transcript: TranscriptSegment[];
   onSeek: (ms: number) => void;
   onTranscriptChange: (nextTranscript: TranscriptSegment[]) => void;
+  /** "모두 바꾸기" (and its undo): saves the whole transcript right away;
+   * resolves true when it also reached the cloud copy. Without it the change
+   * goes through onTranscriptChange and the regular autosave. */
+  onReplaceAll?: (nextTranscript: TranscriptSegment[]) => Promise<boolean>;
   /** Fired once per genuine text change, with the text right before and
    * after this edit — lets the parent run global-term-sync against it. */
   onSegmentCommitted?: (oldText: string, newText: string) => void;
@@ -64,9 +69,22 @@ export function TranscriptPanel({
   transcript,
   onSeek,
   onTranscriptChange,
+  onReplaceAll,
   onSegmentCommitted,
 }: TranscriptPanelProps) {
   const [query, setQuery] = useState("");
+  const [replacement, setReplacement] = useState("");
+  const [isReplacing, setIsReplacing] = useState(false);
+  // The last "모두 바꾸기": what it did, the transcript from before it (for
+  // 되돌리기), and where it got saved. Dropped by any later edit, so an undo
+  // can never wipe out a correction made after it.
+  const [lastReplace, setLastReplace] = useState<{
+    from: string;
+    to: string;
+    count: number;
+    previous: TranscriptSegment[];
+    savedToCloud: boolean | null;
+  } | null>(null);
   const [page, setPage] = useState(1);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftText, setDraftText] = useState("");
@@ -131,6 +149,51 @@ export function TranscriptPanel({
     setPage(1);
   }, [transcript.length]);
 
+  const matchCount = useMemo(() => (query.trim() ? countTranscriptMatches(transcript, query) : 0), [transcript, query]);
+  // A replacement is required: an empty one would delete every match, and
+  // right after a replace the search box holds the new word, one stray
+  // click away from wiping it out.
+  const canReplace = matchCount > 0 && replacement.trim().length > 0 && replacement !== query && !isReplacing;
+
+  async function persistWholeTranscript(next: TranscriptSegment[]): Promise<boolean | null> {
+    if (!onReplaceAll) {
+      onTranscriptChange(next);
+      return null;
+    }
+    return onReplaceAll(next);
+  }
+
+  async function handleReplaceAll() {
+    if (!canReplace) return;
+    const from = query;
+    const to = replacement;
+    const { transcript: next, count } = replaceAllInTranscript(transcript, from, to);
+    if (count === 0) return;
+    setIsReplacing(true);
+    try {
+      const previous = transcript;
+      // Highlight the new word, so what changed is visible right away.
+      setQuery(to);
+      setReplacement("");
+      const savedToCloud = await persistWholeTranscript(next);
+      setLastReplace({ from, to, count, previous, savedToCloud });
+    } finally {
+      setIsReplacing(false);
+    }
+  }
+
+  async function handleUndoReplace() {
+    if (!lastReplace || isReplacing) return;
+    setIsReplacing(true);
+    try {
+      setQuery(lastReplace.from);
+      await persistWholeTranscript(lastReplace.previous);
+      setLastReplace(null);
+    } finally {
+      setIsReplacing(false);
+    }
+  }
+
   const firstMatchId = useMemo(() => {
     if (!query.trim()) return null;
     const lowered = query.toLowerCase();
@@ -172,6 +235,7 @@ export function TranscriptPanel({
       onTranscriptChange(transcript.map((segment) => (segment.id === id ? { ...segment, text } : segment)));
       onSegmentCommitted?.(oldText, text);
       setHasSavedOnce(true);
+      setLastReplace(null);
     } finally {
       pendingRef.current = null;
       setIsSaving(false);
@@ -239,15 +303,73 @@ export function TranscriptPanel({
           </span>
         )}
       </div>
-      <input
-        type="search"
-        value={query}
-        onChange={(event) => setQuery(event.target.value)}
-        placeholder="스크립트에서 검색..."
-        className="mb-2 w-full rounded-lg border border-slate-200 bg-slate-100 px-3 py-1.5 text-sm text-slate-900 outline-none focus:border-indigo-300 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-      />
-      {query.trim() && !firstMatchId && (
+      {/* Find (and replace): stacked rows so both fit a narrow phone screen. */}
+      <div className="mb-2 flex flex-col gap-1.5">
+        <input
+          type="search"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="스크립트에서 검색..."
+          aria-label="스크립트에서 검색"
+          className="w-full rounded-lg border border-slate-200 bg-slate-100 px-3 py-1.5 text-sm text-slate-900 outline-none focus:border-indigo-300 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+        />
+        <div className="flex gap-1.5">
+          <input
+            type="text"
+            value={replacement}
+            onChange={(event) => setReplacement(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+                event.preventDefault();
+                void handleReplaceAll();
+              }
+            }}
+            placeholder="바꿀 단어 (예: 정화 → 정아)"
+            aria-label="바꿀 단어"
+            className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-slate-100 px-3 py-1.5 text-sm text-slate-900 outline-none focus:border-indigo-300 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+          />
+          <button
+            type="button"
+            onClick={() => void handleReplaceAll()}
+            disabled={!canReplace}
+            title={
+              !query.trim()
+                ? "먼저 고칠 단어를 검색하세요"
+                : !replacement.trim()
+                  ? "바꿀 단어를 입력하세요"
+                  : `'${query}'을(를) '${replacement}'(으)로 모두 바꿉니다`
+            }
+            className="shrink-0 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:bg-indigo-300 dark:disabled:bg-indigo-900"
+          >
+            {isReplacing ? "바꾸는 중..." : matchCount > 0 ? `모두 바꾸기 (${matchCount})` : "모두 바꾸기"}
+          </button>
+        </div>
+      </div>
+      {query.trim() && !firstMatchId && !lastReplace && (
         <p className="mb-2 text-xs text-zinc-400 dark:text-zinc-500">일치하는 내용이 없습니다.</p>
+      )}
+      {lastReplace && (
+        <div
+          role="status"
+          className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg bg-emerald-50 px-3 py-1.5 text-xs text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300"
+        >
+          <span className="min-w-0 break-words">
+            ✓ '{lastReplace.from}' → '{lastReplace.to}' {lastReplace.count}곳을 바꿨어요
+            {lastReplace.savedToCloud === true
+              ? " · 클라우드에 저장됨"
+              : lastReplace.savedToCloud === false
+                ? " · 이 기기에 저장됨 (클라우드는 다음 동기화 때 반영)"
+                : ""}
+          </span>
+          <button
+            type="button"
+            onClick={() => void handleUndoReplace()}
+            disabled={isReplacing}
+            className="shrink-0 font-medium underline disabled:opacity-50"
+          >
+            되돌리기
+          </button>
+        </div>
       )}
       <p className="mb-2 text-[11px] text-zinc-400 dark:text-zinc-500">💡 텍스트를 클릭하면 오타를 직접 수정할 수 있어요.</p>
       <div className="max-h-72 overflow-y-auto rounded-xl border border-zinc-100 p-2 dark:border-zinc-800">
