@@ -4,16 +4,17 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNod
 import { Pagination } from "@/components/Pagination";
 import { formatDuration } from "@/lib/format";
 import { countTranscriptMatches, replaceAllInTranscript } from "@/lib/transcriptReplace";
+import type { ReplaceAllRequest, ReplaceAllResult } from "@/lib/transcriptReplace";
 import type { TranscriptSegment } from "@/lib/types";
 
 type TranscriptPanelProps = {
   transcript: TranscriptSegment[];
   onSeek: (ms: number) => void;
   onTranscriptChange: (nextTranscript: TranscriptSegment[]) => void;
-  /** "모두 바꾸기" (and its undo): saves the whole transcript right away;
-   * resolves true when it also reached the cloud copy. Without it the change
-   * goes through onTranscriptChange and the regular autosave. */
-  onReplaceAll?: (nextTranscript: TranscriptSegment[]) => Promise<boolean>;
+  /** "모두 바꾸기": saves the change right away (also in the note when asked)
+   * and returns its undo. Without it the change goes through
+   * onTranscriptChange and the regular autosave, and the note option is hidden. */
+  onReplaceAll?: (request: ReplaceAllRequest) => Promise<ReplaceAllResult>;
   /** Fired once per genuine text change, with the text right before and
    * after this edit — lets the parent run global-term-sync against it. */
   onSegmentCommitted?: (oldText: string, newText: string) => void;
@@ -75,16 +76,22 @@ export function TranscriptPanel({
   const [query, setQuery] = useState("");
   const [replacement, setReplacement] = useState("");
   const [isReplacing, setIsReplacing] = useState(false);
-  // The last "모두 바꾸기": what it did, the transcript from before it (for
-  // 되돌리기), and where it got saved. Dropped by any later edit, so an undo
-  // can never wipe out a correction made after it.
+  // "강의노트·요약·체크리스트에도 적용" — off by default: a word that's an STT
+  // mistake in the script can be correct in the note (정화 as purification).
+  const [applyToNote, setApplyToNote] = useState(false);
+  // The last "모두 바꾸기": what it did, how to undo it, and where it got
+  // saved. Dropped by any later script edit, so an undo can never wipe out a
+  // correction made after it (the page guards the note the same way).
   const [lastReplace, setLastReplace] = useState<{
     from: string;
     to: string;
     count: number;
-    previous: TranscriptSegment[];
+    noteCount: number | null; // null: the note wasn't included
+    undo: () => Promise<unknown>;
     savedToCloud: boolean | null;
   } | null>(null);
+  // One-line result of an undo, e.g. that the note was left alone.
+  const [undoNotice, setUndoNotice] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftText, setDraftText] = useState("");
@@ -155,14 +162,6 @@ export function TranscriptPanel({
   // click away from wiping it out.
   const canReplace = matchCount > 0 && replacement.trim().length > 0 && replacement !== query && !isReplacing;
 
-  async function persistWholeTranscript(next: TranscriptSegment[]): Promise<boolean | null> {
-    if (!onReplaceAll) {
-      onTranscriptChange(next);
-      return null;
-    }
-    return onReplaceAll(next);
-  }
-
   async function handleReplaceAll() {
     if (!canReplace) return;
     const from = query;
@@ -170,13 +169,34 @@ export function TranscriptPanel({
     const { transcript: next, count } = replaceAllInTranscript(transcript, from, to);
     if (count === 0) return;
     setIsReplacing(true);
+    setUndoNotice(null);
     try {
-      const previous = transcript;
       // Highlight the new word, so what changed is visible right away.
       setQuery(to);
       setReplacement("");
-      const savedToCloud = await persistWholeTranscript(next);
-      setLastReplace({ from, to, count, previous, savedToCloud });
+      if (onReplaceAll) {
+        const includeNote = applyToNote;
+        const result = await onReplaceAll({ transcript: next, ...(includeNote ? { alsoNote: { from, to } } : {}) });
+        setLastReplace({
+          from,
+          to,
+          count,
+          noteCount: includeNote ? result.noteCount : null,
+          undo: result.undo,
+          savedToCloud: result.savedToCloud,
+        });
+      } else {
+        const previous = transcript;
+        onTranscriptChange(next);
+        setLastReplace({
+          from,
+          to,
+          count,
+          noteCount: null,
+          undo: async () => onTranscriptChange(previous),
+          savedToCloud: null,
+        });
+      }
     } finally {
       setIsReplacing(false);
     }
@@ -187,7 +207,12 @@ export function TranscriptPanel({
     setIsReplacing(true);
     try {
       setQuery(lastReplace.from);
-      await persistWholeTranscript(lastReplace.previous);
+      const result = (await lastReplace.undo()) as { noteRestored?: boolean } | undefined;
+      if (lastReplace.noteCount && result?.noteRestored === false) {
+        setUndoNotice(
+          "스크립트는 되돌렸어요. 강의노트·요약·체크리스트는 바꾼 뒤에 수정된 내용이 있어서, 그 수정을 지우지 않도록 그대로 두었어요.",
+        );
+      }
       setLastReplace(null);
     } finally {
       setIsReplacing(false);
@@ -344,6 +369,17 @@ export function TranscriptPanel({
             {isReplacing ? "바꾸는 중..." : matchCount > 0 ? `모두 바꾸기 (${matchCount})` : "모두 바꾸기"}
           </button>
         </div>
+        {onReplaceAll && (
+          <label className="flex w-fit cursor-pointer items-center gap-1.5 text-xs text-zinc-600 dark:text-zinc-400">
+            <input
+              type="checkbox"
+              checked={applyToNote}
+              onChange={(event) => setApplyToNote(event.target.checked)}
+              className="h-3.5 w-3.5 accent-indigo-600"
+            />
+            강의노트·요약·체크리스트에도 적용
+          </label>
+        )}
       </div>
       {query.trim() && !firstMatchId && !lastReplace && (
         <p className="mb-2 text-xs text-zinc-400 dark:text-zinc-500">일치하는 내용이 없습니다.</p>
@@ -354,7 +390,13 @@ export function TranscriptPanel({
           className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg bg-emerald-50 px-3 py-1.5 text-xs text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300"
         >
           <span className="min-w-0 break-words">
-            ✓ '{lastReplace.from}' → '{lastReplace.to}' {lastReplace.count}곳을 바꿨어요
+            ✓ '{lastReplace.from}' → '{lastReplace.to}' 스크립트 {lastReplace.count}곳
+            {lastReplace.noteCount === null
+              ? ""
+              : lastReplace.noteCount > 0
+                ? ` + 노트·요약·체크리스트 ${lastReplace.noteCount}곳`
+                : " (노트·요약·체크리스트에는 없음)"}
+            을 바꿨어요
             {lastReplace.savedToCloud === true
               ? " · 클라우드에 저장됨"
               : lastReplace.savedToCloud === false
@@ -370,6 +412,11 @@ export function TranscriptPanel({
             되돌리기
           </button>
         </div>
+      )}
+      {undoNotice && !lastReplace && (
+        <p role="status" className="mb-2 rounded-lg bg-amber-50 px-3 py-1.5 text-xs text-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
+          {undoNotice}
+        </p>
       )}
       <p className="mb-2 text-[11px] text-zinc-400 dark:text-zinc-500">💡 텍스트를 클릭하면 오타를 직접 수정할 수 있어요.</p>
       <div className="max-h-72 overflow-y-auto rounded-xl border border-zinc-100 p-2 dark:border-zinc-800">

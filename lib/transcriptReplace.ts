@@ -8,6 +8,24 @@
 
 import type { TranscriptSegment } from "@/lib/types";
 
+// The panel → page contract for "모두 바꾸기" (components/TranscriptPanel.tsx →
+// RecordingDetailView.tsx). alsoNote: the same replacement in the lecture
+// note, summary and checklist ("강의노트·요약·체크리스트에도 적용").
+export type ReplaceAllRequest = { transcript: TranscriptSegment[]; alsoNote?: { from: string; to: string } };
+export type ReplaceAllUndoResult = {
+  savedToCloud: boolean;
+  // false: the note was edited after the replace, so its undo was skipped
+  // rather than throwing that edit away (the script is restored either way).
+  noteRestored: boolean;
+};
+export type ReplaceAllResult = {
+  // true when the cloud copy was updated too; false = saved on this device
+  // only (signed out / offline), it goes up with the next successful sync.
+  savedToCloud: boolean;
+  noteCount: number;
+  undo: () => Promise<ReplaceAllUndoResult>;
+};
+
 function literalPattern(query: string): RegExp {
   return new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
 }
@@ -19,6 +37,39 @@ export function countTranscriptMatches(transcript: TranscriptSegment[], query: s
     (total, segment) => (segment.source === "blocked" ? total : total + (segment.text.match(pattern)?.length ?? 0)),
     0,
   );
+}
+
+export function replaceAllInText(text: string, query: string, replacement: string): { text: string; count: number } {
+  if (!query) return { text, count: 0 };
+  let count = 0;
+  const next = text.replace(literalPattern(query), () => {
+    count++;
+    return replacement;
+  });
+  return { text: next, count };
+}
+
+// Link / image targets ("](slide_3)", "](https://…)") and HTML tags
+// ("<mark>") are markup, not words — left exactly as they are, so replacing
+// a short word can't break a slide image or a highlight.
+const MARKUP_PATTERN = /(\]\([^)]*\)|<\/?[a-zA-Z][^>]*>)/;
+
+// The same replacement for the note / summary, when "강의노트·요약·체크리스트에도
+// 적용" is checked.
+export function replaceAllInMarkdown(markdown: string, query: string, replacement: string): { text: string; count: number } {
+  if (!query) return { text: markdown, count: 0 };
+  let count = 0;
+  const text = markdown
+    .split(MARKUP_PATTERN)
+    .map((part, index) => {
+      // split() with a capturing group puts the markup at odd indices.
+      if (index % 2 === 1) return part;
+      const replaced = replaceAllInText(part, query, replacement);
+      count += replaced.count;
+      return replaced.text;
+    })
+    .join("");
+  return { text, count };
 }
 
 // Segments without a match keep their identity, so nothing else re-renders.

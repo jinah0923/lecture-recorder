@@ -16,6 +16,7 @@ import { stripMarkTags } from "@/lib/inlineMarkdown";
 import { toNotionPasteMarkdown } from "@/lib/noteBlocks";
 import { renderMarkdown } from "@/lib/markdown";
 import { buildSlideThumbnails } from "@/lib/pdfSlides";
+import type { ReplaceAllRequest, ReplaceAllResult } from "@/lib/transcriptReplace";
 import type { AiResult, ChecklistItem, DraftBlock, TranscriptSegment } from "@/lib/types";
 
 type AttachedImage = { file: File; previewUrl: string };
@@ -34,8 +35,8 @@ type ReviewPanelProps = {
    * analysis job. */
   onSaveLectureNoteNow: (nextLectureNote: string) => Promise<void>;
   onUpdateTranscript: (nextTranscript: TranscriptSegment[]) => void;
-  /** The script's "모두 바꾸기": persists immediately (device + cloud); true when the cloud push succeeded. */
-  onSaveTranscriptNow?: (nextTranscript: TranscriptSegment[]) => Promise<boolean>;
+  /** The script's "모두 바꾸기" (optionally in the note too): persists immediately, returns its undo. */
+  onReplaceAll?: (request: ReplaceAllRequest) => Promise<ReplaceAllResult>;
   onSegmentCommitted?: (oldText: string, newText: string) => void;
   /** "📄 자료 추가해서 다시 분석": opens the caller's modal (pick material, or re-analyze the script alone). */
   onMergeMaterial?: () => void;
@@ -146,7 +147,7 @@ export function ReviewPanel({
   onUpdateLectureNote,
   onSaveLectureNoteNow,
   onUpdateTranscript,
-  onSaveTranscriptNow,
+  onReplaceAll,
   onSegmentCommitted,
   onMergeMaterial,
   mergeProgress = null,
@@ -642,7 +643,7 @@ export function ReviewPanel({
         transcript={aiResult.transcript}
         onSeek={onSeek}
         onTranscriptChange={onUpdateTranscript}
-        onReplaceAll={onSaveTranscriptNow}
+        onReplaceAll={onReplaceAll}
         onSegmentCommitted={onSegmentCommitted}
       />
 

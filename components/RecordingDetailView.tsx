@@ -44,6 +44,8 @@ import { uploadFileToBlob } from "@/lib/blobUpload";
 import { buildSlideThumbnails, extractPdfSlides, extractPdfText } from "@/lib/pdfSlides";
 import { pushLocalSessions } from "@/lib/sync";
 import { extractChangedTerms, replaceAllOccurrences } from "@/lib/termDiff";
+import { replaceAllInMarkdown, replaceAllInText } from "@/lib/transcriptReplace";
+import type { ReplaceAllRequest, ReplaceAllResult, ReplaceAllUndoResult } from "@/lib/transcriptReplace";
 import type {
   AiResult,
   AnalysisEngine,
@@ -970,26 +972,13 @@ export function RecordingDetailView({
     setAiResult((current) => (current ? { ...current, transcript: nextTranscript } : current));
   }, []);
 
-  // The script's "모두 바꾸기" (and its undo): one change across the whole
-  // transcript, so it's written to IndexedDB and pushed to the cloud copy
-  // right away rather than left to the debounced autosave — same shape as
-  // saveLectureNoteNow below. Resolves true when the cloud push went through
-  // (false: signed out or offline — the change is still saved on this device
-  // and goes up with the next successful sync).
-  const saveTranscriptNow = useCallback(
-    async (nextTranscript: TranscriptSegment[]): Promise<boolean> => {
-      let nextAiResult: AiResult | null = null;
-      setAiResult((current) => {
-        if (!current) return current;
-        nextAiResult = {
-          ...current,
-          transcript: nextTranscript,
-          fullText: nextTranscript.map((segment) => segment.text).join(" ").trim(),
-        };
-        return nextAiResult;
-      });
-      if (!nextAiResult) return false;
-      await saveSession(buildSessionSnapshot({ aiResult: nextAiResult }));
+  // Writes an aiResult to IndexedDB and the cloud copy right away; true when
+  // the cloud push went through (false: signed out or offline — still saved
+  // on this device, and it goes up with the next successful sync). Uses the
+  // newest snapshot builder, since an undo can run long after the replace.
+  const persistAiResultNow = useCallback(
+    async (next: AiResult): Promise<boolean> => {
+      await saveSession(latestSnapshotRef.current({ aiResult: next }));
       onSessionSaved();
       try {
         await pushLocalSessions();
@@ -998,7 +987,84 @@ export function RecordingDetailView({
         return false;
       }
     },
-    [buildSessionSnapshot, onSessionSaved],
+    [onSessionSaved],
+  );
+
+  // The script's "모두 바꾸기": one change across the whole transcript (and,
+  // when asked, the note/summary/checklist too), so it's saved right away
+  // rather than left to the debounced autosave — same idea as
+  // saveLectureNoteNow below. Returns its own undo.
+  const replaceAllNow = useCallback(
+    async ({ transcript: nextTranscript, alsoNote }: ReplaceAllRequest): Promise<ReplaceAllResult> => {
+      let before: AiResult | null = null;
+      let after: AiResult | null = null;
+      let noteCount = 0;
+      // setAiResult's updater runs synchronously (see saveLectureNoteNow).
+      setAiResult((current) => {
+        if (!current) return current;
+        before = current;
+        let next: AiResult = {
+          ...current,
+          transcript: nextTranscript,
+          fullText: nextTranscript.map((segment) => segment.text).join(" ").trim(),
+        };
+        if (alsoNote) {
+          const summary = replaceAllInMarkdown(current.summary, alsoNote.from, alsoNote.to);
+          const lectureNote = replaceAllInMarkdown(current.lectureNote, alsoNote.from, alsoNote.to);
+          const checklist = current.checklist.map((item) => replaceAllInText(item.text, alsoNote.from, alsoNote.to));
+          noteCount = summary.count + lectureNote.count + checklist.reduce((total, item) => total + item.count, 0);
+          next = {
+            ...next,
+            summary: summary.text,
+            lectureNote: lectureNote.text,
+            checklist: current.checklist.map((item, index) => ({ ...item, text: checklist[index].text })),
+          };
+        }
+        after = next;
+        return next;
+      });
+      const original = before as AiResult | null;
+      const replaced = after as AiResult | null;
+      if (!original || !replaced) {
+        return { savedToCloud: false, noteCount: 0, undo: async () => ({ savedToCloud: false, noteRestored: false }) };
+      }
+      const savedToCloud = await persistAiResultNow(replaced);
+
+      const undo = async (): Promise<ReplaceAllUndoResult> => {
+        let restored: AiResult | null = null;
+        let noteRestored = !alsoNote || noteCount === 0;
+        setAiResult((current) => {
+          if (!current) return current;
+          let next: AiResult = { ...current, transcript: original.transcript, fullText: original.fullText };
+          // Only when the note is still exactly what the replace produced —
+          // otherwise it was edited since, and putting the old text back
+          // would throw that edit away.
+          const noteUntouched =
+            current.summary === replaced.summary &&
+            current.lectureNote === replaced.lectureNote &&
+            current.checklist.length === replaced.checklist.length &&
+            current.checklist.every((item, index) => item.text === replaced.checklist[index].text);
+          if (alsoNote && noteCount > 0 && noteUntouched) {
+            noteRestored = true;
+            next = {
+              ...next,
+              summary: original.summary,
+              lectureNote: original.lectureNote,
+              // ✓ marks made since stay.
+              checklist: current.checklist.map((item, index) => ({ ...item, text: original.checklist[index]?.text ?? item.text })),
+            };
+          }
+          restored = next;
+          return next;
+        });
+        const result = restored as AiResult | null;
+        if (!result) return { savedToCloud: false, noteRestored: false };
+        return { savedToCloud: await persistAiResultNow(result), noteRestored };
+      };
+
+      return { savedToCloud, noteCount, undo };
+    },
+    [persistAiResultNow],
   );
 
   // Global term sync: when a transcript-segment edit turns out to be a real
@@ -1141,7 +1207,7 @@ export function RecordingDetailView({
           onUpdateLectureNote={updateLectureNote}
           onSaveLectureNoteNow={saveLectureNoteNow}
           onUpdateTranscript={updateTranscript}
-          onSaveTranscriptNow={saveTranscriptNow}
+          onReplaceAll={replaceAllNow}
           onSegmentCommitted={handleSegmentCommitted}
           slideImages={slideImagesMap}
           onMergeMaterial={handleMergeMaterial}
