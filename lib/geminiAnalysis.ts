@@ -14,9 +14,12 @@ import {
   GEMINI_MAX_OUTPUT_TOKENS,
   SAFETY_SETTINGS,
   describeGeminiError as describeSharedGeminiError,
-  readResponseText,
+  streamResponseText,
 } from "@/lib/gemini";
+import { TIME_LIMIT_MESSAGE, hardStopSignal } from "@/lib/jobDeadline";
+import { ensureMissingMaterialNotice } from "@/lib/materialNotice";
 import { buildContinuationPrompt, completeTruncatedNote } from "@/lib/noteCompletion";
+import { appendTimeoutNotice, salvageAnalysisJson } from "@/lib/partialAnalysis";
 
 export const MODEL = "gemini-3.6-flash";
 // How long to wait for an uploaded file to finish Gemini-side processing
@@ -46,6 +49,9 @@ const ANALYSIS_RESPONSE_SCHEMA = {
     },
   },
   required: ["summary", "lectureNote", "checklist"],
+  // Generated in this order, so an answer stopped at the time limit has the
+  // short summary and as much of the note as was written (lib/partialAnalysis.ts).
+  propertyOrdering: ["summary", "lectureNote", "checklist"],
 };
 
 // "data:image/webp;base64,AAAA..." -> a Gemini inline-image Part. Slide
@@ -241,19 +247,40 @@ export async function callAnalysisWorker(
     bookmarkCount: bookmarkLines ? bookmarkLines.split("\n").length : 0,
   });
 
-  const response = await ai.models.generateContent({
-    model: MODEL,
-    contents: createUserContent(contentParts),
-    config: {
-      systemInstruction,
-      responseMimeType: "application/json",
-      responseSchema: ANALYSIS_RESPONSE_SCHEMA,
-      maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
-      safetySettings: SAFETY_SETTINGS,
-    },
-  });
+  // Nothing attached: the note opens with the "[자료 누락]" warning.
+  const withMaterialNotice = (note: string) =>
+    uploadedReferences.length === 0 && slideThumbnails.length === 0 ? ensureMissingMaterialNotice(note) : note;
 
-  const text = readResponseText(response, "강의노트 분석");
+  // Streamed, and stopped just before the platform's 300s kill
+  // (hardStopSignal): an answer cut there is salvaged — summary and the note
+  // up to that point, with the time-limit notice at the cut — and saved as a
+  // completed job instead of the whole job vanishing.
+  const { text, cut } = await streamResponseText(
+    ai,
+    {
+      model: MODEL,
+      contents: createUserContent(contentParts),
+      config: {
+        systemInstruction,
+        responseMimeType: "application/json",
+        responseSchema: ANALYSIS_RESPONSE_SCHEMA,
+        maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
+        safetySettings: SAFETY_SETTINGS,
+      },
+    },
+    "강의노트 분석",
+    hardStopSignal(),
+  );
+  if (cut) {
+    const salvaged = salvageAnalysisJson(text);
+    console.warn("[gemini-analysis] stopped at the time limit — saving the partial note", {
+      answerChars: text.length,
+      noteChars: salvaged.lectureNote.length,
+    });
+    if (!salvaged.lectureNote.trim()) throw new Error(TIME_LIMIT_MESSAGE);
+    return { ...salvaged, lectureNote: withMaterialNotice(appendTimeoutNotice(salvaged.lectureNote)) };
+  }
+
   let parsed: RawAnalysisResponse;
   try {
     parsed = JSON.parse(text);
@@ -267,23 +294,26 @@ export async function callAnalysisWorker(
   if (typeof parsed.lectureNote === "string") {
     parsed.lectureNote = await completeTruncatedNote(
       parsed.lectureNote,
-      async (noteSoFar, lastLine, timeoutMs) => {
-        const continuation = await ai.models.generateContent({
-          model: MODEL,
-          contents: createUserContent([...contentParts, buildContinuationPrompt(noteSoFar, lastLine)]),
-          config: {
-            systemInstruction,
-            responseMimeType: "text/plain",
-            maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
-            safetySettings: SAFETY_SETTINGS,
-            ...(Number.isFinite(timeoutMs) ? { abortSignal: AbortSignal.timeout(timeoutMs) } : {}),
+      (noteSoFar, lastLine) =>
+        streamResponseText(
+          ai,
+          {
+            model: MODEL,
+            contents: createUserContent([...contentParts, buildContinuationPrompt(noteSoFar, lastLine)]),
+            config: {
+              systemInstruction,
+              responseMimeType: "text/plain",
+              maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
+              safetySettings: SAFETY_SETTINGS,
+            },
           },
-        });
-        return continuation.text ?? "";
-      },
+          "강의노트 이어 쓰기",
+          hardStopSignal(),
+        ),
       "gemini-analysis",
     );
   }
+  if (typeof parsed.lectureNote === "string") parsed.lectureNote = withMaterialNotice(parsed.lectureNote);
   return parsed;
 }
 

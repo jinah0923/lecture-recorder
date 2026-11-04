@@ -5,7 +5,9 @@
 import { ANALYSIS_FIELD_DESCRIPTIONS } from "@/lib/analysisPrompt";
 import type { CheckpointSegment, RawAnalysisResponse } from "@/lib/analysisPipeline";
 import { friendlyHttpMessage } from "@/lib/friendlyErrors";
+import { TIME_LIMIT_MESSAGE, hardStopSignal } from "@/lib/jobDeadline";
 import { buildContinuationPrompt, completeTruncatedNote } from "@/lib/noteCompletion";
+import { appendTimeoutNotice, salvageAnalysisJson } from "@/lib/partialAnalysis";
 
 const OPENAI_API_BASE_URL = "https://api.openai.com/v1";
 export const OPENAI_STT_MODEL = "whisper-1";
@@ -143,13 +145,22 @@ export async function transcribeWithWhisper(
   // learner's own glossary is exactly what it's for.
   if (keywords.length > 0) form.append("prompt", keywords.join(", ").slice(0, 600));
 
-  const response = await fetch(`${OPENAI_API_BASE_URL}/audio/transcriptions`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}` },
-    body: form,
-  });
-  if (!response.ok) throw new Error(await describeOpenAiFailure(response, "음성 인식(Whisper)"));
-  const data = (await response.json()) as { segments?: WhisperSegment[] };
+  // Stopped near the platform's 300s kill and reported, like Gemini's STT.
+  const stopSignal = hardStopSignal();
+  let data: { segments?: WhisperSegment[] };
+  try {
+    const response = await fetch(`${OPENAI_API_BASE_URL}/audio/transcriptions`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: form,
+      ...(stopSignal ? { signal: stopSignal } : {}),
+    });
+    if (!response.ok) throw new Error(await describeOpenAiFailure(response, "음성 인식(Whisper)"));
+    data = (await response.json()) as { segments?: WhisperSegment[] };
+  } catch (error) {
+    if (stopSignal?.aborted) throw new Error(TIME_LIMIT_MESSAGE);
+    throw error;
+  }
   const segments = groupWhisperSegments(Array.isArray(data.segments) ? data.segments : []);
   return { hasSpeech: segments.length > 0, segments };
 }
@@ -171,6 +182,59 @@ const ANALYSIS_JSON_SCHEMA = {
 
 type ChatContentPart = { type: "text"; text: string } | { type: "image_url"; image_url: { url: string; detail: "low" } };
 
+// A streamed chat completion (server-sent events), stoppable by `signal` —
+// the job's time limit (lib/jobDeadline.ts hardStopSignal) — keeping what was
+// written so far: cut: true means it was stopped there.
+async function streamChatCompletion(
+  apiKey: string,
+  body: Record<string, unknown>,
+  what: string,
+  signal?: AbortSignal,
+): Promise<{ text: string; cut: boolean; finishReason: string | null; refusal: string }> {
+  let text = "";
+  let refusal = "";
+  let finishReason: string | null = null;
+  try {
+    const response = await fetch(`${OPENAI_API_BASE_URL}/chat/completions`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ ...body, stream: true }),
+      ...(signal ? { signal } : {}),
+    });
+    if (!response.ok) throw new Error(await describeOpenAiFailure(response, what));
+    if (!response.body) throw new Error(`OpenAI로부터 ${what} 응답을 받지 못했습니다. 다시 시도해주세요.`);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffered = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffered += decoder.decode(value, { stream: true });
+      const lines = buffered.split("\n");
+      buffered = lines.pop() ?? "";
+      for (const line of lines) {
+        const data = line.trim().replace(/^data:\s*/, "");
+        if (!line.trim().startsWith("data:") || data === "[DONE]") continue;
+        try {
+          const event = JSON.parse(data) as {
+            choices?: { delta?: { content?: string | null; refusal?: string | null }; finish_reason?: string | null }[];
+          };
+          const choice = event.choices?.[0];
+          text += choice?.delta?.content ?? "";
+          refusal += choice?.delta?.refusal ?? "";
+          if (choice?.finish_reason) finishReason = choice.finish_reason;
+        } catch {
+          // a keep-alive or partial line — the next read completes it
+        }
+      }
+    }
+  } catch (error) {
+    if (signal?.aborted) return { text, cut: true, finishReason, refusal };
+    throw error;
+  }
+  return { text, cut: Boolean(signal?.aborted), finishReason, refusal };
+}
+
 export async function analyzeWithOpenAi(
   apiKey: string,
   systemInstruction: string,
@@ -184,10 +248,11 @@ export async function analyzeWithOpenAi(
   // context window.
   for (const url of imageDataUrls) content.push({ type: "image_url", image_url: { url, detail: "low" } });
 
-  const response = await fetch(`${OPENAI_API_BASE_URL}/chat/completions`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
+  // Streamed and stopped just before the platform's 300s kill — same
+  // salvage as the Gemini worker (lib/partialAnalysis.ts).
+  const streamed = await streamChatCompletion(
+    apiKey,
+    {
       model,
       messages: [
         { role: "system", content: systemInstruction },
@@ -195,28 +260,31 @@ export async function analyzeWithOpenAi(
       ],
       response_format: { type: "json_schema", json_schema: ANALYSIS_JSON_SCHEMA },
       max_completion_tokens: openAiMaxOutputTokens(),
-    }),
-  });
-  if (!response.ok) throw new Error(await describeOpenAiFailure(response, "강의노트 분석"));
-
-  const data = (await response.json()) as {
-    choices?: { finish_reason?: string; message?: { content?: string | null; refusal?: string | null } }[];
-  };
-  const choice = data.choices?.[0];
-  if (choice?.message?.refusal) {
-    throw new Error(`OpenAI가 이 강의 내용의 분석을 거부했습니다: ${choice.message.refusal}`);
+    },
+    "강의노트 분석",
+    hardStopSignal(),
+  );
+  if (streamed.cut) {
+    const salvaged = salvageAnalysisJson(streamed.text);
+    console.warn("[openai-analysis] stopped at the time limit — saving the partial note", { noteChars: salvaged.lectureNote.length });
+    if (!salvaged.lectureNote.trim()) throw new Error(TIME_LIMIT_MESSAGE);
+    return { ...salvaged, lectureNote: appendTimeoutNotice(salvaged.lectureNote) };
   }
-  if (choice?.finish_reason === "length") {
+  if (streamed.refusal) {
+    throw new Error(`OpenAI가 이 강의 내용의 분석을 거부했습니다: ${streamed.refusal}`);
+  }
+  const choice = { finish_reason: streamed.finishReason, message: { content: streamed.text } };
+  if (choice.finish_reason === "length") {
     throw new Error(
       `강의노트가 ${model}의 최대 출력 길이(${openAiMaxOutputTokens().toLocaleString()} 토큰)에 도달해 잘렸습니다. 녹음이 매우 ` +
         "길다면 Gemini 엔진을 사용하거나, 서버의 OPENAI_ANALYSIS_MODEL / OPENAI_ANALYSIS_MAX_TOKENS를 더 긴 출력을 지원하는 " +
         "모델로 바꿔주세요. (음성 인식 결과는 저장되어 있어 다시 시도하면 바로 이어서 분석합니다.)",
     );
   }
-  if (choice?.finish_reason === "content_filter") {
+  if (choice.finish_reason === "content_filter") {
     throw new Error("OpenAI 콘텐츠 정책에 의해 강의노트 생성이 중단되었습니다 (finish_reason: content_filter).");
   }
-  const text = choice?.message?.content;
+  const text = choice.message.content;
   if (!text) throw new Error("OpenAI로부터 강의노트 분석 응답을 받지 못했습니다. 다시 시도해주세요.");
   let parsed: RawAnalysisResponse;
   try {
@@ -230,27 +298,21 @@ export async function analyzeWithOpenAi(
   if (typeof parsed.lectureNote === "string") {
     parsed.lectureNote = await completeTruncatedNote(
       parsed.lectureNote,
-      async (noteSoFar, lastLine, timeoutMs) => {
-        const continuationResponse = await fetch(`${OPENAI_API_BASE_URL}/chat/completions`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-          body: JSON.stringify({
+      async (noteSoFar, lastLine) => {
+        const continuation = await streamChatCompletion(
+          apiKey,
+          {
             model,
             messages: [
               { role: "system", content: systemInstruction },
               { role: "user", content: [...content, { type: "text", text: buildContinuationPrompt(noteSoFar, lastLine) }] },
             ],
             max_completion_tokens: openAiMaxOutputTokens(),
-          }),
-          ...(Number.isFinite(timeoutMs) ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
-        });
-        if (!continuationResponse.ok) {
-          throw new Error(await describeOpenAiFailure(continuationResponse, "강의노트 이어 쓰기"));
-        }
-        const continuationData = (await continuationResponse.json()) as {
-          choices?: { message?: { content?: string | null } }[];
-        };
-        return continuationData.choices?.[0]?.message?.content ?? "";
+          },
+          "강의노트 이어 쓰기",
+          hardStopSignal(),
+        );
+        return { text: continuation.text, cut: continuation.cut };
       },
       "openai-analysis",
     );

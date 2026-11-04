@@ -2,7 +2,7 @@
 // (app/api/transcribe-and-summarize/route.ts, app/api/expand-note/route.ts).
 
 import { ApiError, BlockedReason, FinishReason, HarmBlockThreshold, HarmCategory } from "@google/genai";
-import type { GenerateContentResponse, SafetySetting } from "@google/genai";
+import type { GenerateContentParameters, GenerateContentResponse, GoogleGenAI, SafetySetting } from "@google/genai";
 import { friendlyHttpMessage } from "@/lib/friendlyErrors";
 import { PROHIBITED_CONTENT_MESSAGE } from "@/lib/geminiMessages";
 
@@ -149,4 +149,39 @@ export function readResponseText(response: GenerateContentResponse, what: string
     );
   }
   return text;
+}
+
+// The streamed form of a generateContent call, for the long answers (the
+// lecture note and its continuation): stoppable mid-answer by `signal` —
+// the job's time limit (lib/jobDeadline.ts hardStopSignal) — without losing
+// what was already written. cut: true means it was stopped there and `text`
+// is the part produced so far. A finished answer goes through the same
+// block / finish-reason checks as readResponseText: the prompt feedback
+// arrives on an early chunk, the finish reason on the last.
+export async function streamResponseText(
+  ai: GoogleGenAI,
+  params: GenerateContentParameters,
+  what: string,
+  signal?: AbortSignal,
+): Promise<{ text: string; cut: boolean }> {
+  let text = "";
+  let promptFeedback: GenerateContentResponse["promptFeedback"];
+  let candidates: GenerateContentResponse["candidates"];
+  try {
+    const stream = await ai.models.generateContentStream({
+      ...params,
+      config: { ...params.config, ...(signal ? { abortSignal: signal } : {}) },
+    });
+    for await (const chunk of stream) {
+      promptFeedback = chunk.promptFeedback ?? promptFeedback;
+      candidates = chunk.candidates ?? candidates;
+      text += chunk.text ?? "";
+    }
+  } catch (error) {
+    if (signal?.aborted) return { text, cut: true };
+    throw error;
+  }
+  if (signal?.aborted) return { text, cut: true };
+  const finished = { promptFeedback, candidates, text } as unknown as GenerateContentResponse;
+  return { text: readResponseText(finished, what), cut: false };
 }

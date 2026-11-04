@@ -15,6 +15,7 @@ import {
 } from "@/lib/analysisPipeline";
 import type { AnalysisResult, AudioChunkRef, BlobRef, CheckpointSegment, IncomingBookmark, SttCheckpoint } from "@/lib/analysisPipeline";
 import { buildAnalysisPrompt } from "@/lib/analysisPrompt";
+import { ensureMissingMaterialNotice } from "@/lib/materialNotice";
 import { OPENAI_KEY_MISSING_MESSAGE, analyzeWithOpenAi, openAiApiKey, transcribeWithWhisper } from "@/lib/openai";
 import { isRedisConfigured } from "@/lib/redis";
 import type { UserApprovedFallbackReason } from "@/lib/types";
@@ -173,6 +174,10 @@ async function analyze(
     promptChars: userPrompt.length,
   });
   const raw = await analyzeWithOpenAi(apiKey, prompt.systemInstruction, userPrompt, imageDataUrls);
+  // Nothing attached: the note opens with the "[자료 누락]" warning.
+  if (referenceTexts.length + referenceImages.length === 0 && typeof raw.lectureNote === "string") {
+    raw.lectureNote = ensureMissingMaterialNotice(raw.lectureNote);
+  }
   return buildAnalysisResult(checkpoint.segments, true, raw, { engine: "openai", userApprovedFallback: fallbackReason });
 }
 

@@ -15,6 +15,7 @@ import {
   VERBATIM_TERMINOLOGY_RULE,
 } from "@/lib/promptRules";
 import { NOTE_END_MARKER, NOTE_END_MARKER_RULE } from "@/lib/noteCompletion";
+import { MISSING_MATERIAL_RULE } from "@/lib/materialNotice";
 import { OVERVIEW_MINDMAP_RULE } from "@/lib/overviewMindmap";
 
 // Field descriptions for the analysis JSON response (Gemini responseSchema /
@@ -242,6 +243,7 @@ export function buildAnalysisPrompt(
     );
   } else {
     promptLines.push("- 강의자료가 첨부되지 않았으므로 음성 강의 내용만으로 최대한 상세하게 작성하세요.");
+    if (!hasSlideImages) promptLines.push(`- ${MISSING_MATERIAL_RULE}`);
   }
 
   if (hasSlideImages) {

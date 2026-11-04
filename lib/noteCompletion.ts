@@ -10,6 +10,7 @@
 // where it stopped.
 
 import { getJobTimeRemainingMs } from "@/lib/jobDeadline";
+import { appendTimeoutNotice } from "@/lib/partialAnalysis";
 
 export const NOTE_END_MARKER = "[[END_OF_NOTE]]";
 
@@ -25,11 +26,10 @@ export const TRUNCATION_WARNING =
   "'AI 심화 탐구'에서 \"○○ 이후 내용이 빠졌어\"처럼 요청해 녹음·교재 기반으로 복원하세요.";
 
 const MAX_CONTINUATION_ROUNDS = 2;
-// A continuation can be as long as the original output; below this much
-// time left in the job, trying would just get the whole job killed.
-const MIN_TIME_FOR_CONTINUATION_MS = 60_000;
-// Head room kept after a continuation call for saving the result.
-const SAVE_HEADROOM_MS = 15_000;
+// Below this much time left in the job a continuation isn't started. (One
+// that runs into the limit is stopped and keeps what it wrote — see
+// hardStopSignal — so this only skips attempts too short to add anything.)
+const MIN_TIME_FOR_CONTINUATION_MS = 30_000;
 
 export function hasNoteEndMarker(note: string): boolean {
   return note.includes(NOTE_END_MARKER);
@@ -70,13 +70,16 @@ export function buildContinuationPrompt(noteSoFar: string, lastLine: string): st
   ].join("\n");
 }
 
-// continueNote(noteSoFar, lastLine, timeoutMs) returns the continuation text
-// (its first line replaces lastLine). Returns the completed note with the
-// marker removed, or — when it still couldn't be completed — the note with
-// TRUNCATION_WARNING appended.
+// continueNote(noteSoFar, lastLine) returns the continuation text (its first
+// line replaces lastLine), and cut: true when it was stopped at the job's
+// time limit (lib/jobDeadline.ts hardStopSignal) — what it wrote up to then
+// is kept. Returns the completed note with the marker removed, or the note
+// with TRUNCATION_WARNING / the time-limit notice appended.
+export type NoteContinuation = { text: string; cut: boolean };
+
 export async function completeTruncatedNote(
   note: string,
-  continueNote: (noteSoFar: string, lastLine: string, timeoutMs: number) => Promise<string>,
+  continueNote: (noteSoFar: string, lastLine: string) => Promise<NoteContinuation>,
   logLabel: string,
 ): Promise<string> {
   if (!note.trim() || hasNoteEndMarker(note)) return stripNoteEndMarker(note);
@@ -94,15 +97,20 @@ export async function completeTruncatedNote(
       noteChars: current.length,
       lastLine: lastLine.slice(0, 120),
     });
-    let continuation: string;
+    let result: NoteContinuation;
     try {
-      continuation = (await continueNote(head, lastLine, remaining - SAVE_HEADROOM_MS)).trim();
+      result = await continueNote(head, lastLine);
     } catch (error) {
       console.error(`[${logLabel}] continuation failed`, error);
       break;
     }
     // A fenced reply despite the instructions.
-    continuation = continuation.replace(/^```(?:markdown|md)?\s*\n/, "").replace(/\n```\s*$/, "");
+    const continuation = result.text.trim().replace(/^```(?:markdown|md)?\s*\n/, "").replace(/\n```\s*$/, "");
+    if (result.cut) {
+      console.warn(`[${logLabel}] continuation stopped at the time limit`, { chars: continuation.length });
+      if (continuation) current = head ? `${head}\n${continuation}` : continuation;
+      return appendTimeoutNotice(stripNoteEndMarker(current));
+    }
     if (!continuation) break;
     current = head ? `${head}\n${continuation}` : continuation;
     if (hasNoteEndMarker(current)) return stripNoteEndMarker(current);

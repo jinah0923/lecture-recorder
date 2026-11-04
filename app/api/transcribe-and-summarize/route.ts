@@ -1,5 +1,5 @@
 import { NextResponse, after } from "next/server";
-import { runWithJobDeadline } from "@/lib/jobDeadline";
+import { TIME_LIMIT_MESSAGE, hardStopSignal, runWithJobDeadline } from "@/lib/jobDeadline";
 import { del, get } from "@vercel/blob";
 import { ApiError, GoogleGenAI, Type, createPartFromUri, createUserContent } from "@google/genai";
 import {
@@ -201,20 +201,31 @@ async function callSttWorker(ai: GoogleGenAI, uploadedAudio: GenAiFile): Promise
     audioFile: { uri: uploadedAudio.uri, mimeType: uploadedAudio.mimeType, name: uploadedAudio.name },
   });
 
-  const response = await ai.models.generateContent({
-    model: MODEL,
-    contents: createUserContent([
-      userPrompt,
-      createPartFromUri(uploadedAudio.uri ?? "", uploadedAudio.mimeType ?? "audio/webm"),
-    ]),
-    config: {
-      systemInstruction,
-      responseMimeType: "application/json",
-      responseSchema: STT_RESPONSE_SCHEMA,
-      maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
-      safetySettings: SAFETY_SETTINGS,
-    },
-  });
+  // A transcript cut off halfway is no use as a timestamped script, so a call
+  // still running near the platform's 300s kill is stopped (hardStopSignal)
+  // and reported as such — instead of the job vanishing with no message.
+  const stopSignal = hardStopSignal();
+  let response;
+  try {
+    response = await ai.models.generateContent({
+      model: MODEL,
+      contents: createUserContent([
+        userPrompt,
+        createPartFromUri(uploadedAudio.uri ?? "", uploadedAudio.mimeType ?? "audio/webm"),
+      ]),
+      config: {
+        systemInstruction,
+        responseMimeType: "application/json",
+        responseSchema: STT_RESPONSE_SCHEMA,
+        maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
+        safetySettings: SAFETY_SETTINGS,
+        ...(stopSignal ? { abortSignal: stopSignal } : {}),
+      },
+    });
+  } catch (error) {
+    if (stopSignal?.aborted) throw new Error(TIME_LIMIT_MESSAGE);
+    throw error;
+  }
 
   const text = readResponseText(response, "스크립트(STT)");
   try {
