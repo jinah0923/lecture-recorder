@@ -27,7 +27,8 @@ import {
   startMergeMaterialJob,
 } from "@/lib/analysisJob";
 import { probeAudioDurationMs } from "@/lib/audio";
-import { shouldChunk, splitAudioInBrowser } from "@/lib/audioChunking";
+import { CHUNK_DURATION_MS, shouldChunk, splitAudioInBrowser } from "@/lib/audioChunking";
+import { transcribeInPieces } from "@/lib/chunkedTranscription";
 import { describeBlockedChunks, parseProhibitedContentError } from "@/lib/geminiMessages";
 import {
   cacheAudioBlob,
@@ -593,7 +594,9 @@ export function RecordingDetailView({
       // works even if localAudio was never recovered (IndexedDB cache lost
       // too, no reattach yet) — resuming genuinely doesn't need it.
       let audioBlob: UploadedBlobRef | null = null;
-      let audioChunks: Array<UploadedBlobRef & { startMs: number }> | undefined;
+      // Only from an older resumed job — long recordings are now transcribed
+      // piece by piece below before the job starts.
+      const audioChunks: Array<UploadedBlobRef & { startMs: number }> | undefined = undefined;
       if (resumeFromCheckpoint) {
         setAnalyzeProgress("이전 STT 결과를 불러오는 중...");
       } else {
@@ -619,18 +622,20 @@ export function RecordingDetailView({
             effectiveDurationMs,
             (done, total) => setAnalyzeProgress(`오디오 분할 중 (${Math.min(done + 1, total)}/${total})...`),
           );
-          audioChunks = [];
-          for (let index = 0; index < pieces.length; index++) {
-            const piece = pieces[index];
-            const uploaded = await uploadFileToBlob(
-              piece.blob,
-              piece.fileName,
-              piece.mimeType,
-              (fraction) =>
-                setAnalyzeProgress(`오디오 조각 업로드 중 (${index + 1}/${pieces.length}) ${Math.round(fraction * 100)}%`),
-            );
-            audioChunks.push({ ...uploaded, startMs: piece.startMs });
-          }
+          // Each ~10-minute piece is transcribed by its own request, one at a
+          // time (own 300s budget each), stitched, and stored server-side as
+          // this session's STT checkpoint — the analysis job started below
+          // then goes straight to writing the note.
+          await transcribeInPieces({
+            engine,
+            sessionId,
+            pieces,
+            durationMs: effectiveDurationMs,
+            fingerprint: `${audioName}:${audio.blob.size}:${effectiveDurationMs}:${CHUNK_DURATION_MS}`,
+            keywords,
+            onProgress: setAnalyzeProgress,
+          });
+          setHasSttCheckpoint(true);
         } else {
           setAnalyzeProgress("오디오 업로드 중...");
           audioBlob = await uploadFileToBlob(audio.blob, audioName, audioMime, (fraction) =>
@@ -714,7 +719,15 @@ export function RecordingDetailView({
       await resumeJobPolling(jobId);
     } catch (error) {
       console.error("분석 시작 실패:", error);
-      setAnalyzeError(error instanceof Error ? error.message : "분석 중 알 수 없는 오류가 발생했습니다.");
+      const message = toFriendlyErrorMessage(error instanceof Error ? error.message : "분석 중 알 수 없는 오류가 발생했습니다.");
+      setAnalyzeError(message);
+      // Every piece refused by Gemini (piece-by-piece STT) — same modal as a
+      // refused analysis job.
+      const blocked = parseProhibitedContentError(message);
+      if (blocked) {
+        setPolicyBlock(blocked);
+        if (engine === "gemini") setFallbackOffer("policy");
+      }
       // A failed OpenAI retry (e.g. audio not loaded) keeps its button.
       if (engine === "openai") setFallbackOffer(approvedReasonRef.current);
       setIsAnalyzing(false);

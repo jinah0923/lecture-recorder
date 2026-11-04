@@ -5,12 +5,13 @@
 import type { FFmpeg } from "@ffmpeg/ffmpeg";
 
 // Above this, the recording is split into CHUNK_DURATION_MS pieces in the
-// browser before upload (see splitAudioInBrowser) — the server never sees the
-// whole recording as one file. 30 minutes is comfortably inside what a single
-// STT call can handle within the 300s function budget; conservative on
-// purpose.
-export const CHUNK_THRESHOLD_MS = 30 * 60 * 1000;
-export const CHUNK_DURATION_MS = 20 * 60 * 1000;
+// browser and each piece is transcribed by its own request, one after
+// another (lib/chunkedTranscription.ts) — every piece gets a full 300s
+// function budget, instead of a long recording's whole STT plus the note
+// sharing one job's 300s. A recording up to 12 minutes still goes in one
+// piece, transcribed alongside the note in the analysis job.
+export const CHUNK_THRESHOLD_MS = 12 * 60 * 1000;
+export const CHUNK_DURATION_MS = 10 * 60 * 1000;
 
 export type AudioChunkFile = {
   blob: Blob;
