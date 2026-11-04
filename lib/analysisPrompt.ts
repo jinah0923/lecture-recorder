@@ -5,6 +5,7 @@
 import { BLOCKED_CHUNK_MARKER } from "@/lib/geminiMessages";
 import {
   EQUATION_FORMAT_RULE,
+  GREEK_LETTER_RULE,
   HEADING_DEPTH_RULE,
   JOURNAL_ENTRY_RULE,
   MAJOR_TOPIC_RULE,
@@ -185,6 +186,7 @@ export function buildAnalysisPrompt(
     `- ${HEADING_DEPTH_RULE}`,
     `- ${NESTED_LIST_RULE}`,
     `- ${EQUATION_FORMAT_RULE}`,
+    `- ${GREEK_LETTER_RULE}`,
     `- ${JOURNAL_ENTRY_RULE}`,
     `- ${NOTE_END_MARKER_RULE}`,
     "- [표 적극 활용 — 비교·범주화 데이터는 반드시 표] 계정 분류(자산·부채·자본·수익·비용 등), 장부기록 유형, " +

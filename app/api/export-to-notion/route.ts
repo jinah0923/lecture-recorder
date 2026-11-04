@@ -4,7 +4,7 @@ import type { BlockObjectRequest } from "@notionhq/client";
 import { extractNotionId } from "@/lib/notionUtils";
 import { formatDuration } from "@/lib/format";
 import { tokenizeInline } from "@/lib/inlineMarkdown";
-import { displayMathFenceClose, matchDisplayMathLine, protectMath, splitMathPlaceholders } from "@/lib/inlineMath";
+import { displayMathFenceClose, matchDisplayMathLine, normalizeTex, protectMath, splitMathPlaceholders } from "@/lib/inlineMath";
 import {
   EQUATION_MARKER,
   buildListTree,
@@ -270,7 +270,7 @@ function convertLectureNoteToBlocks(markdown: string): BlockNode[] {
       if (displayFenceClose !== null) {
         const body: string[] = [];
         while (next < lines.length && lines[next].trim() !== displayFenceClose) body.push(lines[next++]);
-        expression = body.join("\n").trim();
+        expression = normalizeTex(body.join("\n").trim());
         next = Math.min(next + 1, lines.length);
       }
       if (expression && expression.length <= EQUATION_CHAR_LIMIT) {

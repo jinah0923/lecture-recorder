@@ -12,6 +12,7 @@ import { stripMarkTags, tokenizeInline } from "@/lib/inlineMarkdown";
 import {
   displayMathFenceClose,
   matchDisplayMathLine,
+  normalizeTex,
   protectMath,
   splitMathPlaceholders,
 } from "@/lib/inlineMath";
@@ -153,7 +154,7 @@ export function markdownToClipboardHtml(markdown: string): string {
       if (fenceClose !== null) {
         const body: string[] = [];
         while (next < lines.length && lines[next].trim() !== fenceClose) body.push(lines[next++].trim());
-        tex = body.join(" ").trim();
+        tex = normalizeTex(body.join(" ").trim());
         next = Math.min(next + 1, lines.length);
       }
       if (tex) blocks.push(`<p>${escapeHtml(`$$${tex}$$`)}</p>`);

@@ -10,6 +10,7 @@ import {
 import type { Part } from "@google/genai";
 import {
   EQUATION_FORMAT_RULE,
+  GREEK_LETTER_RULE,
   HEADING_DEPTH_RULE,
   JOURNAL_ENTRY_RULE,
   MERMAID_DIAGRAM_RULE,
@@ -317,6 +318,7 @@ export async function POST(request: Request) {
     HEADING_DEPTH_RULE,
     NESTED_LIST_RULE,
     EQUATION_FORMAT_RULE,
+    GREEK_LETTER_RULE,
     JOURNAL_ENTRY_RULE,
     MERMAID_DIAGRAM_RULE,
   ]

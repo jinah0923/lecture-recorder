@@ -45,6 +45,20 @@ export const EQUATION_FORMAT_RULE = [
   "- 수식 기호는 LaTeX가 아닌 일반 텍스트 기호(=, +, −, ×, ÷, →)만 사용하세요.",
 ].join("\n");
 
+// The AI wrote \Beta for β-mercaptoethylamine. \Alpha, \Beta, … aren't
+// LaTeX (only the capitals that differ from Latin letters have macros), so
+// they render as "B" or fail outright depending on the renderer. The
+// renderers also rewrite them (normalizeTex in lib/inlineMath.ts) — this is
+// the first line of defence. Shared with the deep-dive writer.
+export const GREEK_LETTER_RULE = [
+  "[그리스 문자·과학 기호 — 렌더링 오류 방지] 생화학·과학 용어의 그리스 문자(예: β-mercaptoethylamine, α-helix, γ-globulin)는 " +
+    "가능하면 유니코드 문자(α, β, γ, δ, μ, Δ 등)로 직접 쓰세요.",
+  "- 수식 안에서 LaTeX 매크로를 써야 한다면 반드시 소문자 그리스어 매크로(`\\alpha`, `\\beta`, `\\gamma`, `\\mu` 등)를 사용하세요. " +
+    "`\\Alpha`, `\\Beta`, `\\Epsilon`, `\\Kappa`, `\\Mu`, `\\Rho`, `\\Tau` 등 LaTeX 표준에 없는 대문자 매크로는 화면 렌더링 에러를 " +
+    "유발하므로 절대 사용을 금지합니다. 대문자 매크로는 표준에 있는 `\\Gamma`, `\\Delta`, `\\Theta`, `\\Lambda`, `\\Xi`, `\\Pi`, " +
+    "`\\Sigma`, `\\Upsilon`, `\\Phi`, `\\Psi`, `\\Omega`만 쓸 수 있습니다.",
+].join("\n");
+
 // Journal entries were written as prose ("현금 100만 원을 차변에, 자본금을
 // 대변에...") or squeezed into table cells, where the "|" split the cell. One
 // fixed line per entry keeps debit and credit side by side. Shared with the

@@ -1,10 +1,8 @@
 "use client";
 
-import katex from "katex";
-// Registers \ce{...} for chemical formulas, as on screen (lib/markdown.tsx).
-import "katex/contrib/mhchem";
 import { tokenizeInline } from "@/lib/inlineMarkdown";
-import { displayMathFenceClose, matchDisplayMathLine, protectMath, splitMathPlaceholders } from "@/lib/inlineMath";
+import { displayMathFenceClose, matchDisplayMathLine, normalizeTex, protectMath, splitMathPlaceholders } from "@/lib/inlineMath";
+import { renderKatexHtml } from "@/lib/katexRender";
 import type { MathSpan } from "@/lib/inlineMath";
 import {
   buildListTree,
@@ -101,7 +99,7 @@ const PDF_HIGHLIGHT_WORD_STYLE = `${PDF_HIGHLIGHT_STYLE}white-space:nowrap;word-
 // right with KaTeX's stylesheet and fonts, which exportSectionsToPdf copies
 // into the capture frame (see copyKatexCss / loadKatexFonts).
 function mathHtml(span: MathSpan): string {
-  return katex.renderToString(span.tex, { displayMode: span.display, throwOnError: false, strict: "ignore" });
+  return renderKatexHtml(span.tex, span.display);
 }
 
 // Text that may contain formula placeholders (protectMath) -> HTML, with
@@ -438,7 +436,7 @@ export function renderMarkdownToHtml(markdown: string, slideImages?: Map<number,
       if (displayFenceClose !== null) {
         const body: string[] = [];
         while (next < lines.length && lines[next].trim() !== displayFenceClose) body.push(lines[next++]);
-        tex = body.join("\n").trim();
+        tex = normalizeTex(body.join("\n").trim());
         next = Math.min(next + 1, lines.length);
       }
       if (tex) {

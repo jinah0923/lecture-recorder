@@ -1,12 +1,10 @@
 import { Fragment, type ReactNode } from "react";
-import katex from "katex";
-// Registers \ce{...} / \pu{...} for chemical formulas (H2O, reaction arrows).
-import "katex/contrib/mhchem";
 import { MarkdownImage } from "@/components/MarkdownImage";
 import { MermaidDiagram } from "@/components/MermaidDiagram";
 import { SlideImage } from "@/components/SlideImage";
 import { stripMarkTags, tokenizeInline } from "@/lib/inlineMarkdown";
-import { displayMathFenceClose, matchDisplayMathLine, protectMath, splitMathPlaceholders } from "@/lib/inlineMath";
+import { displayMathFenceClose, matchDisplayMathLine, normalizeTex, protectMath, splitMathPlaceholders } from "@/lib/inlineMath";
+import { renderKatexHtml } from "@/lib/katexRender";
 import type { MathSpan } from "@/lib/inlineMath";
 import {
   buildListTree,
@@ -96,14 +94,14 @@ function renderEquationBlock(key: string | number, equations: string[]): ReactNo
 
 // KaTeX output for a formula, cached — the note re-renders on every edit
 // and keystroke elsewhere on the page, and the same formulas recur.
-// throwOnError: false shows a bad formula as red source text instead of
-// breaking the note. Styles come from katex.min.css (app/layout.tsx).
+// A formula KaTeX can't parse shows as muted source text, not red errors
+// (lib/katexRender.ts). Styles come from katex.min.css (app/layout.tsx).
 const mathHtmlCache = new Map<string, string>();
 function renderMathHtml(tex: string, display: boolean): string {
   const key = `${display ? "D" : "I"}${tex}`;
   let html = mathHtmlCache.get(key);
   if (html === undefined) {
-    html = katex.renderToString(tex, { displayMode: display, throwOnError: false, strict: "ignore" });
+    html = renderKatexHtml(tex, display);
     if (mathHtmlCache.size > 500) mathHtmlCache.clear();
     mathHtmlCache.set(key, html);
   }
@@ -339,7 +337,7 @@ export function renderMarkdown(markdown: string, slideImages?: Map<number, strin
       if (fenceClose !== null) {
         const body: string[] = [];
         while (next < lines.length && lines[next].trim() !== fenceClose) body.push(lines[next++]);
-        tex = body.join("\n").trim();
+        tex = normalizeTex(body.join("\n").trim());
         next = Math.min(next + 1, lines.length);
       }
       blocks.push(
