@@ -32,7 +32,6 @@ import type {
   RawAnalysisResponse,
   SttCheckpoint,
 } from "@/lib/analysisPipeline";
-import { LATEX_BAN_RULE } from "@/lib/analysisPrompt";
 import { blockedChunkTranscriptText } from "@/lib/geminiMessages";
 import type { BlockedChunkNotice } from "@/lib/types";
 import type { File as GenAiFile } from "@google/genai";
@@ -165,6 +164,12 @@ type RawSttResponse = { hasSpeech?: unknown; script?: unknown };
 // no connection to keep alive, unlike the SSE-streaming version this route
 // used before moving to the job-queue architecture (see the file-level
 // comment above).
+// A transcript is what was said, in words — no formula markup even though
+// the note itself may use LaTeX (MATH_NOTATION_RULE in lib/promptRules.ts).
+const TRANSCRIPT_PLAIN_TEXT_RULE =
+  "받아쓰기 텍스트에는 LaTeX 문법(예: \\rightarrow, $...$ 등 백슬래시 명령어나 달러 기호로 감싼 수식)을 절대 쓰지 마세요. " +
+  "수식이나 기호를 말한 부분도 들린 그대로 일반 텍스트(필요하면 →, ≥, ≤, ± 같은 일반 기호)로 적으세요.";
+
 async function callSttWorker(ai: GoogleGenAI, uploadedAudio: GenAiFile): Promise<RawSttResponse> {
   const systemInstruction = [
     ACADEMIC_CONTEXT_INSTRUCTION,
@@ -176,7 +181,7 @@ async function callSttWorker(ai: GoogleGenAI, uploadedAudio: GenAiFile): Promise
     "당신의 유일한 임무는 오디오에 실제로 발화된 내용을 정확하게 받아쓰는 것입니다 — 요약하거나 압축하거나 의역하지 마세요.",
     "script는 반드시 오디오 00:00부터 끝까지에 대한 100% 완전한 받아쓰기여야 합니다. 오디오가 길다는 이유로 " +
       "일부 구간을 생략, 압축, 요약하는 것은 절대 허용되지 않습니다.",
-    LATEX_BAN_RULE,
+    TRANSCRIPT_PLAIN_TEXT_RULE,
     "오디오에 사람이 말하는 음성이 실제로 들리면 hasSpeech를 true로 설정하고 script를 처음부터 끝까지 빠짐없이 채우세요.",
     "오디오에 사람의 말소리가 없거나 무음, 배경음악, 단순 신호음/잡음뿐이어서 내용을 알아들을 수 없는 경우 " +
       "hasSpeech를 false로, script는 빈 배열로 응답하세요. 이 경우 절대로 내용을 지어내지 마세요.",

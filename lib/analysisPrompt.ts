@@ -9,6 +9,7 @@ import {
   HEADING_DEPTH_RULE,
   JOURNAL_ENTRY_RULE,
   MAJOR_TOPIC_RULE,
+  MATH_NOTATION_RULE,
   MERMAID_DIAGRAM_RULE,
   NESTED_LIST_RULE,
   VERBATIM_TERMINOLOGY_RULE,
@@ -16,21 +17,13 @@ import {
 import { NOTE_END_MARKER, NOTE_END_MARKER_RULE } from "@/lib/noteCompletion";
 import { OVERVIEW_MINDMAP_RULE } from "@/lib/overviewMindmap";
 
-// Shared by both workers' system instructions — Gemini otherwise tends to
-// reach for \rightarrow / $...$ style LaTeX for arrows and formulas, which
-// this app's markdown renderer doesn't support and renders as broken raw
-// syntax instead of the intended symbol.
-export const LATEX_BAN_RULE =
-  "화살표나 기호를 작성할 때 절대 LaTeX 문법(예: \\rightarrow, $...$ 등 백슬래시 명령어나 달러 기호로 감싼 수식)을 " +
-  "사용하지 마십시오. 반드시 일반 텍스트 기호(예: ->, =>, →, ≥, ≤, ±)만 사용하십시오.";
-
 // Field descriptions for the analysis JSON response (Gemini responseSchema /
 // OpenAI json_schema).
 export const ANALYSIS_FIELD_DESCRIPTIONS = {
   summary:
     "녹음 음성만을 기반으로 한 핵심 요약 3~5개를 '• '로 시작하는 글머리 기호 리스트로 작성 (마크다운, 줄글 문단 형태 금지)",
   lectureNote:
-    "강의 음성과 참고자료를 통합해 원본의 정보량을 100% 보존한 무손실 상세 강의노트 (마크다운, 요약 금지). 교재·교안이 첨부되면 교재의 목차·본문·표·박스 글을 뼈대로 그대로 옮기고 음성 해설을 그 아래에 덧붙인 교재 중심 단권화 노트이며, 지식의 총량·깊이와 사실 판단은 교수 음성이 기준(교재와 충돌하면 음성이 정답, '> 🚨 교수님 교재 정정:' 블록으로 기록)이고, '[자료 생략]'·'[슬라이드 N페이지 참조]'처럼 내용 대신 위치만 가리키는 표기는 금지. '## 1. 대주제' / '### 1.1 소주제' 번호 체계의 단권화 교재 구조 — 첫 번째 ## 대주제 앞에 '**🗺️ 전체 개요 마인드맵**' 제목 줄과 ```mermaid mindmap(대주제·소주제만의 전체 뼈대)을 반드시 배치(전체를 내용의 흐름에 따라 3~5개 안팎의 ## 대주제로 분할하되 같은 흐름의 소주제는 한 ## 아래 ###로 묶음 — ##가 화면 페이지 나누기 기준, 제목은 최대 ### H3까지, 그보다 세부 내용은 불릿), 본문은 일반 텍스트/불릿 기본(하위 개념은 공백 4칸 들여쓴 하위 불릿으로 위계 구분, 독립 주제는 같은 레벨 불릿), 비교·범주화 데이터는 마크다운 표, 교수 강조·실무 팁은 '> 💡 교수님 코멘트/해설:' / '> ▲ 필기 팁:' 콜아웃(시험 출제 명시는 '> 🚨')으로 본문과 분리. 회계 분개는 '(차) 계정과목 금액 | (대) 계정과목 금액' 한 줄 양식. 교수가 강조한 문장·자료에서 시각적으로 강조된 텍스트는 빠짐없이 포함하고 <mark>...</mark>로 형광펜 표시. 수식·등식은 줄바꿈 없는 독립된 `> 🧮 ` 한 줄로 작성. 강의자료의 도식·순서도·마인드맵은 ```mermaid 다이어그램으로 재현. 노트를 끝까지 다 쓴 뒤 맨 마지막 줄에 완결 표시 " +
+    "강의 음성과 참고자료를 통합해 원본의 정보량을 100% 보존한 무손실 상세 강의노트 (마크다운, 요약 금지). 교재·교안이 첨부되면 교재의 목차·본문·표·박스 글을 뼈대로 그대로 옮기고 음성 해설을 그 아래에 덧붙인 교재 중심 단권화 노트이며, 지식의 총량·깊이와 사실 판단은 교수 음성이 기준(교재와 충돌하면 음성이 정답, '> 🚨 교수님 교재 정정:' 블록으로 기록)이고, '[자료 생략]'·'[슬라이드 N페이지 참조]'처럼 내용 대신 위치만 가리키는 표기는 금지. '## 1. 대주제' / '### 1.1 소주제' 번호 체계의 단권화 교재 구조 — 첫 번째 ## 대주제 앞에 '**🗺️ 전체 개요 마인드맵**' 제목 줄과 ```mermaid mindmap(대주제·소주제만의 전체 뼈대)을 반드시 배치(전체를 내용의 흐름에 따라 3~5개 안팎의 ## 대주제로 분할하되 같은 흐름의 소주제는 한 ## 아래 ###로 묶음 — ##가 화면 페이지 나누기 기준, 제목은 최대 ### H3까지, 그보다 세부 내용은 불릿), 본문은 일반 텍스트/불릿 기본(하위 개념은 공백 4칸 들여쓴 하위 불릿으로 위계 구분, 독립 주제는 같은 레벨 불릿), 비교·범주화 데이터는 마크다운 표, 교수 강조·실무 팁은 '> 💡 교수님 코멘트/해설:' / '> ▲ 필기 팁:' 콜아웃(시험 출제 명시는 '> 🚨')으로 본문과 분리. 회계 분개는 '(차) 계정과목 금액 | (대) 계정과목 금액' 한 줄 양식. 교수가 강조한 문장·자료에서 시각적으로 강조된 텍스트는 빠짐없이 포함하고 <mark>...</mark>로 형광펜 표시. 수식·등식은 줄바꿈 없는 독립된 `> 🧮 ` 한 줄로 작성(LaTeX는 `$...$` 안에서만, 본문에 백슬래시 명령어 금지). 강의자료의 도식·순서도·마인드맵은 ```mermaid 다이어그램으로 재현. 노트를 끝까지 다 쓴 뒤 맨 마지막 줄에 완결 표시 " +
     `${NOTE_END_MARKER} 를 단독으로 작성`,
   checklist: "학습자가 실천해야 할 과제/복습 체크리스트 문장 목록",
 };
@@ -70,7 +63,7 @@ export function buildAnalysisPrompt(
       : "",
     "summary와 lectureNote는 역할이 다릅니다: 요약이 허용되는 곳은 오직 summary(짧은 개요) 하나뿐이고, lectureNote는 음성과 " +
       "참고자료의 정보를 100% 보존하는 무손실 기록입니다. lectureNote에서는 어떤 형태의 압축·축약·생략도 허용되지 않습니다.",
-    LATEX_BAN_RULE,
+    MATH_NOTATION_RULE,
     audioSource.kind === "file"
       ? "오디오에 사람이 말하는 강의 음성이 실제로 들리면 summary/lectureNote/checklist를 모두 채우세요. 오디오에 사람의 " +
         "말소리가 없거나 무음, 배경음악, 단순 신호음/잡음뿐이어서 강의 내용을 알아들을 수 없는 경우 summary와 " +

@@ -42,7 +42,28 @@ export const EQUATION_FORMAT_RULE = [
   "- 교수가 강조한 수식이라면 수식 전체를 `<mark>`로 감쌀 수 있습니다: `> 🧮 <mark>자산 = 부채 + 자본</mark>`.",
   "- 여러 단계로 전개되는 식은 단계마다 `> 🧮 ` 줄을 하나씩 연달아 쓰세요. 수식의 의미·각 항의 설명은 수식 줄 바로 " +
     "아래에 별도의 문장이나 글머리 기호로 쓰세요(설명을 수식 줄 안에 붙이지 말 것).",
-  "- 수식 기호는 LaTeX가 아닌 일반 텍스트 기호(=, +, −, ×, ÷, →)만 사용하세요.",
+  "- 수식 줄의 표기는 아래 [수식·기호 표기] 규칙을 따르세요: 간단한 식은 일반 텍스트 기호(=, +, −, ×, ÷, →)로, 분수·첨자·" +
+    "그리스 문자 등이 들어가면 식 전체를 LaTeX `$...$`로 쓰세요. 예: `> 🧮 $\\Delta G = \\Delta H - T\\Delta S$`",
+].join("\n");
+
+// Formulas used to be banned from LaTeX entirely, from before the renderers
+// drew math. They now render $...$ / $$...$$ with KaTeX everywhere (screen,
+// PDF, clipboard, Notion — lib/inlineMath.ts), so the rule is "LaTeX, but
+// only inside the delimiters": a bare \rightarrow in prose is still printed
+// as-is. Shared with the deep-dive writer, whose blocks merge into the note.
+export const MATH_NOTATION_RULE = [
+  "[수식·기호 표기 — LaTeX는 `$` 안에서만] 노트는 `$...$`(문장 속 수식)와 `$$...$$`(한 줄 전체 수식) 안의 LaTeX를 수식으로 " +
+    "렌더링합니다.",
+  "- 분수·위첨자/아래첨자·근호·그리스 문자·합/적분·벡터처럼 일반 텍스트로 정확히 쓰기 어려운 수학·과학 수식은 LaTeX로 쓰고 " +
+    "반드시 `$...$`로 감싸세요. 예: `$x^2 + y^2 = r^2$`, `$\\frac{a}{b}$`, `$K_a = \\frac{[H^+][A^-]}{[HA]}$`. 화학식·반응식은 " +
+    "`$\\ce{2H2 + O2 -> 2H2O}$`처럼 `\\ce{}`를 쓸 수 있습니다.",
+  "- `$` 밖의 본문 문장에서는 백슬래시 명령어(`\\rightarrow`, `\\geq`, `\\times` 등)를 절대 쓰지 마세요 — 수식으로 바뀌지 않고 " +
+    "글자 그대로 노출됩니다. 본문의 화살표·부등호·기호는 →, ⇒, ≥, ≤, ±, × 같은 일반 기호로 쓰세요.",
+  "- 간단한 등식(예: 자산 = 부채 + 자본)은 LaTeX 없이 일반 텍스트로 충분합니다. 꼭 필요한 곳에만 LaTeX를 쓰세요.",
+  "- `$` 구분자 규칙: 여는 `$` 바로 뒤와 닫는 `$` 바로 앞에 공백을 두지 마세요(`$ x $` 금지, `$x$`). 금액은 수식으로 오인되지 " +
+    "않게 `5달러`, `US$5`처럼 쓰세요. 마크다운 표 셀 안의 수식에는 세로선 `|` 대신 `\\lvert x \\rvert`나 `\\mid`를 쓰세요(`|`는 " +
+    "표를 깨뜨립니다).",
+  "- Mermaid 다이어그램 라벨 안에는 `$` 수식을 쓰지 마세요(다이어그램 규칙과 동일).",
 ].join("\n");
 
 // The AI wrote \Beta for β-mercaptoethylamine. \Alpha, \Beta, … aren't

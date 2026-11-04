@@ -13,6 +13,7 @@ import {
   GREEK_LETTER_RULE,
   HEADING_DEPTH_RULE,
   JOURNAL_ENTRY_RULE,
+  MATH_NOTATION_RULE,
   MERMAID_DIAGRAM_RULE,
   NESTED_LIST_RULE,
   VERBATIM_TERMINOLOGY_RULE,
@@ -114,14 +115,6 @@ const DEEP_DIVE_MODE_RULES = [
   "확실하지 않은 수치·연도·인명·논문은 지어내지 마세요. 확신할 수 있는 일반적인 전공 지식만 쓰세요. foundInSources는 " +
     "항상 true로 응답하세요.",
 ];
-
-// Mirrors app/api/transcribe-and-summarize/route.ts's LATEX_BAN_RULE — this
-// block gets merged into the very same lectureNote and rendered by the same
-// three renderers (lib/markdown.tsx / lib/pdfExport.ts / export-to-notion),
-// none of which parse LaTeX, so it must stay consistent with the main note.
-const LATEX_BAN_RULE =
-  "화살표나 기호를 작성할 때 절대 LaTeX 문법(예: \\rightarrow, $...$ 등 백슬래시 명령어나 달러 기호로 감싼 수식)을 " +
-  "사용하지 마십시오. 반드시 일반 텍스트 기호(예: ->, =>, →, ≥, ≤, ±)만 사용하십시오.";
 
 type IncomingSlideThumbnail = { page: number; dataUrl: string };
 
@@ -314,7 +307,7 @@ export async function POST(request: Request) {
       "둔 채 추가되는 문단/콜아웃으로). content는 anchorText 위치 바로 다음 줄에 항상 새로 삽입(Append)되는 " +
       "블록이며, 절대로 기존 문장을 삭제하거나 덮어쓰는 용도로 쓰이지 않습니다 — 이 사실을 항상 염두에 두고 " +
       "작성하세요.",
-    LATEX_BAN_RULE,
+    MATH_NOTATION_RULE,
     HEADING_DEPTH_RULE,
     NESTED_LIST_RULE,
     EQUATION_FORMAT_RULE,
